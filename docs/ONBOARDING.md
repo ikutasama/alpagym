@@ -20,8 +20,9 @@ getting a model bundle, and launching a run. For the system overview, see the
 
 ## Hardware and Disk Budget
 
-To comfortably run AlpaGym locally we recommend a CUDA GPU with at least 40 GB
-of VRAM (e.g. A6000) and ~100–150 GB of free disk for the `uv` environment,
+To comfortably run AlpaGym locally with the AR1.5 policy, we recommend two (with smaller 
+models, colocated on one GPU is also feasible)CUDA GPU with at least 40 GBof VRAM 
+(e.g. A6000) and ~100–150 GB of free diskfor the `uv` environment,
 container images, and model weights (Alpamayo-R1-10B ~21 GB), plus ~1.5 GB for
 each NuRec scene you download (the full `public_2601` NuRec suite is ~1.5 TB).
 
