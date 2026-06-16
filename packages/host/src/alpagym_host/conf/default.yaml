@@ -1,0 +1,166 @@
+defaults:
+  - config_schema
+  - _self_
+  - policy: alpamayo
+  - reward: distance_to_gt
+  - transport: disk
+  - topology: ???
+  - optional run: null
+  - optional experiment: null
+  # Override with deploy=slurm to submit a Slurm job, and provide the
+  # site-specific partition/account/container image values as config overrides.
+  - deploy: local
+
+run_root: ./tmp/alpagym-runs
+
+logging_level: INFO
+
+# Optional root for deployment-owned writable caches.
+cache_root_dir: null
+
+execution:
+  # The topology preset selects the backend (local_process or slurm); the deploy
+  # preset fills the site settings (partition/account/image/caches) below.
+  backend: ???
+  # Set only when executing a run that was already prepared and written to disk.
+  # Leave null for command=run to prepare a new run from this Hydra config.
+  resolved_config_path: null
+  slurm:
+    job_name: alpagym
+    partition: null
+    account: null
+    time: "02:00:00"
+    nodes: 1
+    gpus_per_node: 8
+    exclusive: true
+    cpus_per_task: 16
+    # Set mem to "0" to request all memory on an allocated node.
+    mem: null
+    container_image: null
+    container_cache_root: null
+    # The host-side AlpaGym checkout path, mounted identically into the container
+    # (the deploy preset mounts the filesystem that holds it). Cosmos runs
+    # `uv sync --project` and launches from here.
+    container_workdir: ${current_alpagym_project_root:}
+
+# Per-episode step budget the trainer's packer pads every rollout to.
+expected_valid_steps: 8
+
+dataset:
+  test_suite_id: null
+  # test_suite_id: public_2507
+  scene_ids:
+    - clipgt-01d503d4-449b-46fc-8d78-9085e70d3554
+    - clipgt-37113280-a033-4be4-afdd-cb199299e028
+    # - clipgt-35b7b92a-b64d-4b54-afbb-d23f0b4df598
+    # - clipgt-2f474f6d-509a-483e-ad4d-43fee7b4fb06
+
+alpasim:
+  # Set repo_path to use an existing checkout directly. When set, AlpaGym skips
+  # clone/fetch/checkout/sync and starts Wizard from this path.
+  repo_path: null
+  # Optional directory for cached AlpaSim checkouts. Defaults to XDG_CACHE_HOME.
+  checkout_cache_dir: null
+  # AlpaSim mirror cloned for the Wizard checkout. Shared default for all
+  # deploys; set repo_path to start Wizard from a local checkout instead.
+  repo_url: https://github.com/NVlabs/alpasim.git
+  repo_ref: ${alpasim_grpc_repo_ref:}
+  startup_timeout_s: 1200.0
+  simulation_timeout_s: 600.0
+  wizard_args:
+    topology: 1gpu
+    driver: null
+    driver_source: external_dynamic
+    force_gt_duration_us: 1_700_000
+    control_timestep_us: 100_000
+    # Derive n_sim_steps so each rollout yields expected_valid_steps closed-loop
+    # policy steps: the policy runs only after the force-GT warmup, so
+    # n_sim_steps = expected_valid_steps + warmup steps.
+    n_sim_steps: "${add:${expected_valid_steps},${floordiv:${alpasim.wizard_args.force_gt_duration_us},${alpasim.wizard_args.control_timestep_us}}}"
+    # Free-form sink for any other Hydra-style wizard overrides. Promote
+    # anything we set unconditionally to a dedicated `wizard_args` field;
+    # use this only for one-off / experimental tweaks.
+    extra_overrides: ""
+
+perf:
+  enabled: false
+  # reservoir sampling stride for timing
+  sample_every_n: 1
+  # null disables the periodic monitor
+  resource_sample_interval_s: 5.0
+  # per-series reservoir cap (percentiles)
+  max_samples_per_series: 1000
+  # count trigger for a background flush
+  flush_every_n_updates: 1000
+  # time trigger for a background flush
+  flush_interval_s: 60.0
+  collect_cpu: true
+  collect_gpu: true
+
+cosmos:
+  mode: colocated
+  launch:
+    policy_replicas: 1
+    rollout_replicas: 1
+    controller_port: 29500
+  train:
+    train_batch_per_replica: 1
+    max_num_steps: 1
+    num_epochs: 1
+    # AdamW learning rate (Cosmos-RL default: 1e-6).
+    optm_lr: 1.0e-6
+    # Linear warmup steps for the learning rate (Cosmos-RL default: 20).
+    optm_warmup_steps: 20
+    # Checkpoint settings. With `enable_checkpoint: true` the cosmos resume
+    # bundle is written every `save_freq` steps and always on the last step;
+    # with `export_safetensors: true` an HF-compatible weight set is also
+    # written. Saves land under
+    # `{run_dir}/cosmos/<timestamp>/{checkpoints,safetensors}/step_N/`
+    # (cosmos appends `<timestamp>` to `train.output_dir` at startup).
+    ckpt:
+      enable_checkpoint: true
+      save_freq: 20
+      save_freq_in_epoch: 0
+      export_safetensors: true
+      max_keep: 5
+    train_policy:
+      allowed_outdated_steps: 4
+      on_policy: false
+      mini_batch: 1
+      # PPO/GRPO ratio clipping. The trajectory probability ratio is clipped
+      # to [1 - grpo_ratio_clip_low, 1 + grpo_ratio_clip_high].
+      grpo_ratio_clip_low: 0.2
+      grpo_ratio_clip_high: 0.2
+      # Number of PPO/GRPO optimization passes over each collected rollout
+      # group; total updates per group are this value * num_mini_batches.
+      grpo_optimization_iterations: 1
+      # Optional KL penalty against a reference model. 0 disables the penalty.
+      kl_beta: 0.0
+      # Trainer steps between reference-model refreshes when KL is enabled.
+      # 0 means the reference model is not refreshed.
+      reference_reset_interval: 0
+  policy:
+    parallelism:
+      tp_size: 1
+      cp_size: 1
+      ep_size: 1
+      dp_shard_size: 1
+      pp_size: 1
+      pp_micro_batch_size: 1
+      dp_replicate_size: 1
+  rollout:
+    n_generation: 1
+    batch_size: 1
+    # Run cosmos-rl's _prefetch_loop so the streaming rollout backend can
+    # start the next batch's simulate(1) calls before the current batch's
+    # rollout_generation returns. Requires dp_shard_size == 1.
+    prefetch_rollout: true
+    parallelism:
+      tp_size: 1
+      pp_size: 1
+  logging:
+    # Add `wandb` to enable Weights & Biases logging.
+    logger: [console]
+    log_training_metrics_every_n_steps: 1
+    project_name: alpagym
+    experiment_name: alpagym_default_exp

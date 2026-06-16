@@ -1,0 +1,539 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import sys
+import types
+from types import SimpleNamespace
+from typing import Any, cast
+
+import pytest
+import torch
+
+
+def install_alpasim_grpc_stubs() -> None:
+    """Install minimal generated-stub stand-ins for runtime unit tests."""
+    alpasim_grpc: Any = types.ModuleType("alpasim_grpc")
+    alpasim_grpc_v0: Any = types.ModuleType("alpasim_grpc.v0")
+    common_pb2: Any = types.ModuleType("alpasim_grpc.v0.common_pb2")
+    egodriver_pb2: Any = types.ModuleType("alpasim_grpc.v0.egodriver_pb2")
+    runtime_pb2: Any = types.ModuleType("alpasim_grpc.v0.runtime_pb2")
+    sensorsim_pb2: Any = types.ModuleType("alpasim_grpc.v0.sensorsim_pb2")
+    egodriver_pb2_grpc: Any = types.ModuleType("alpasim_grpc.v0.egodriver_pb2_grpc")
+    runtime_pb2_grpc: Any = types.ModuleType("alpasim_grpc.v0.runtime_pb2_grpc")
+
+    class Empty:
+        """Tiny stand-in for common.Empty."""
+
+    class SessionRequestStatus:
+        """Tiny stand-in for common.SessionRequestStatus."""
+
+    class VersionId:
+        """Tiny stand-in for common.VersionId."""
+
+        def __init__(self, version_id: str = "", git_hash: str = "") -> None:
+            """Store version fields."""
+            self.version_id = version_id
+            self.git_hash = git_hash
+
+    class PoseAtTime:
+        """Tiny stand-in for common.PoseAtTime."""
+
+        def __init__(self, timestamp_us: int = 0) -> None:
+            """Create a timestamped pose with mutable vec/quat fields."""
+            self.timestamp_us = timestamp_us
+            self.pose = SimpleNamespace(
+                vec=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+                quat=SimpleNamespace(w=0.0, x=0.0, y=0.0, z=0.0),
+            )
+
+    class Trajectory:
+        """Tiny stand-in for common.Trajectory."""
+
+        def __init__(self, poses=None) -> None:
+            """Create a trajectory with optional poses."""
+            self.poses = list(poses or [])
+
+    class DriveResponse:
+        """Tiny stand-in for egodriver.DriveResponse."""
+
+        def __init__(self) -> None:
+            """Create an empty response trajectory."""
+            self.trajectory = SimpleNamespace(poses=[])
+
+    class Route:
+        """Tiny stand-in for egodriver.Route."""
+
+        def __init__(self, timestamp_us: int = 0, waypoints=None) -> None:
+            """Store route waypoints."""
+            self.timestamp_us = timestamp_us
+            self.waypoints = list(waypoints or [])
+
+    class GroundTruth:
+        """Tiny stand-in for egodriver.GroundTruth."""
+
+        def __init__(self, trajectory=None, timestamp_us: int = 0) -> None:
+            """Store an optional trajectory and the rig anchor timestamp."""
+            self.trajectory = trajectory
+            self.timestamp_us = timestamp_us
+
+    class DriveSessionRequest:
+        """Tiny stand-in for egodriver.DriveSessionRequest."""
+
+        class RolloutSpec:
+            """Tiny stand-in for DriveSessionRequest.RolloutSpec."""
+
+            def __init__(self) -> None:
+                """Create empty vehicle camera metadata."""
+                self.vehicle = SimpleNamespace(available_cameras=[])
+
+    class RolloutCameraImage:
+        """Tiny stand-in for egodriver.RolloutCameraImage."""
+
+        class CameraImage:
+            """Tiny stand-in for RolloutCameraImage.CameraImage."""
+
+            def __init__(
+                self,
+                logical_id: str = "",
+                image_bytes: bytes = b"",
+                frame_end_us: int = 0,
+            ) -> None:
+                """Store camera-image attributes accessed by the converter."""
+                self.logical_id = logical_id
+                self.image_bytes = image_bytes
+                self.frame_end_us = frame_end_us
+
+    class DriveRequest:
+        """Tiny stand-in for egodriver.DriveRequest."""
+
+    class DriveSessionCloseRequest:
+        """Tiny stand-in for egodriver.DriveSessionCloseRequest."""
+
+    class GroundTruthRequest:
+        """Tiny stand-in for egodriver.GroundTruthRequest."""
+
+    class RolloutEgoTrajectory:
+        """Tiny stand-in for egodriver.RolloutEgoTrajectory."""
+
+    class RouteRequest:
+        """Tiny stand-in for egodriver.RouteRequest."""
+
+    class CameraSpec:
+        """Tiny stand-in for sensorsim.CameraSpec."""
+
+    class _Repeated(list):
+        """List with protobuf-style add()."""
+
+        def __init__(self, item_type: type) -> None:
+            """Store the item type to construct in add()."""
+            super().__init__()
+            self._item_type = item_type
+
+        def add(self):
+            """Append and return one item."""
+            item = self._item_type()
+            self.append(item)
+            return item
+
+    class _DriverAddress:
+        """Tiny stand-in for SimulationRequest.DriverAddress."""
+
+        def __init__(self) -> None:
+            """Initialize address fields."""
+            self.ip = ""
+            self.port = 0
+
+    class _RolloutSpec:
+        """Tiny stand-in for runtime.RolloutSpec."""
+
+        def __init__(self) -> None:
+            """Initialize rollout spec fields."""
+            self.scenario_id = ""
+            self.nr_rollouts = 0
+            self.session_uuids: list[str] = []
+
+    class SimulationRequest:
+        """Tiny stand-in for runtime.SimulationRequest."""
+
+        def __init__(self) -> None:
+            """Create repeated request fields."""
+            self.available_drivers = _Repeated(_DriverAddress)
+            self.rollout_specs = _Repeated(_RolloutSpec)
+            self.n_concurrent_per_driver = 0
+
+    class SimulationReturn:
+        """Tiny stand-in for runtime.SimulationReturn."""
+
+        def __init__(self) -> None:
+            """Create repeated response fields."""
+            self.rollout_returns = []
+
+    class EgodriverServiceServicer:
+        """Tiny stand-in for generated servicer base."""
+
+    class RuntimeServiceStub:
+        """Tiny stand-in for generated RuntimeService stub."""
+
+        def __init__(self, channel: object) -> None:
+            """Accept a channel."""
+            self.channel = channel
+
+    def add_EgodriverServiceServicer_to_server(servicer: object, server: Any) -> None:
+        """Attach a servicer to a fake server."""
+        server.servicer = servicer
+
+    common_pb2.Empty = Empty
+    common_pb2.PoseAtTime = PoseAtTime
+    common_pb2.Pose = SimpleNamespace
+    common_pb2.SessionRequestStatus = SessionRequestStatus
+    common_pb2.Trajectory = Trajectory
+    common_pb2.VersionId = VersionId
+    egodriver_pb2.DriveRequest = DriveRequest
+    egodriver_pb2.DriveResponse = DriveResponse
+    egodriver_pb2.DriveSessionCloseRequest = DriveSessionCloseRequest
+    egodriver_pb2.DriveSessionRequest = DriveSessionRequest
+    egodriver_pb2.GroundTruth = GroundTruth
+    egodriver_pb2.GroundTruthRequest = GroundTruthRequest
+    egodriver_pb2.RolloutCameraImage = RolloutCameraImage
+    egodriver_pb2.RolloutEgoTrajectory = RolloutEgoTrajectory
+    egodriver_pb2.Route = Route
+    egodriver_pb2.RouteRequest = RouteRequest
+    egodriver_pb2_grpc.EgodriverServiceServicer = EgodriverServiceServicer
+    egodriver_pb2_grpc.add_EgodriverServiceServicer_to_server = (
+        add_EgodriverServiceServicer_to_server
+    )
+    runtime_pb2.SimulationRequest = SimulationRequest
+    runtime_pb2.SimulationReturn = SimulationReturn
+    runtime_pb2_grpc.RuntimeServiceStub = RuntimeServiceStub
+    sensorsim_pb2.CameraSpec = CameraSpec
+
+    sys.modules["alpasim_grpc"] = alpasim_grpc
+    sys.modules["alpasim_grpc.v0"] = alpasim_grpc_v0
+    sys.modules["alpasim_grpc.v0.common_pb2"] = common_pb2
+    sys.modules["alpasim_grpc.v0.egodriver_pb2"] = egodriver_pb2
+    sys.modules["alpasim_grpc.v0.egodriver_pb2_grpc"] = egodriver_pb2_grpc
+    sys.modules["alpasim_grpc.v0.runtime_pb2"] = runtime_pb2
+    sys.modules["alpasim_grpc.v0.runtime_pb2_grpc"] = runtime_pb2_grpc
+    sys.modules["alpasim_grpc.v0.sensorsim_pb2"] = sensorsim_pb2
+
+
+install_alpasim_grpc_stubs()
+
+from alpagym_runtime.alpasim.proto_conversion import (  # noqa: E402
+    build_simulation_request_proto,
+    drive_response_from_policy_output,
+    ground_truth_from_proto,
+    policy_input_from_tick_buffer,
+)
+from alpagym_runtime.alpasim.tick_buffer import TickBuffer  # noqa: E402
+from alpagym_runtime.types import PolicyOutput, RolloutCalibration  # noqa: E402
+from alpasim_grpc.v0.egodriver_pb2 import GroundTruth, RolloutCameraImage, Route  # noqa: E402
+
+
+def test_simulation_request_carries_batch_scenes_generation_and_driver() -> None:
+    """Builds one RuntimeService request for a batch of scene sessions."""
+    request = build_simulation_request_proto(
+        scene_ids=("scene_a", "scene_b", "scene_a"),
+        n_generation=2,
+        driver_host="localhost",
+        driver_port=50052,
+        n_concurrent_per_driver=3,
+    )
+
+    assert [spec.scenario_id for spec in request.rollout_specs] == [
+        "scene_a",
+        "scene_b",
+        "scene_a",
+    ]
+    assert [spec.nr_rollouts for spec in request.rollout_specs] == [2, 2, 2]
+    assert request.available_drivers[0].ip == "localhost"
+    assert request.available_drivers[0].port == 50052
+    assert request.n_concurrent_per_driver == 3
+
+
+def test_simulation_request_threads_session_uuid_for_per_rollout_dispatch() -> None:
+    """Per-rollout streaming dispatch pins the session uuid on `RolloutSpec.session_uuids`."""
+    request = build_simulation_request_proto(
+        scene_ids=("scene_a",),
+        n_generation=1,
+        driver_host="localhost",
+        driver_port=50052,
+        n_concurrent_per_driver=1,
+        session_uuid="abc-123",
+    )
+
+    assert list(request.rollout_specs[0].session_uuids) == ["abc-123"]
+
+
+def test_simulation_request_rejects_session_uuid_outside_per_rollout_shape() -> None:
+    """`session_uuid` requires the request to describe exactly one rollout of one scene."""
+    with pytest.raises(ValueError, match="session_uuid is only valid"):
+        build_simulation_request_proto(
+            scene_ids=("scene_a", "scene_b"),
+            n_generation=1,
+            driver_host="localhost",
+            driver_port=50052,
+            n_concurrent_per_driver=1,
+            session_uuid="abc-123",
+        )
+    with pytest.raises(ValueError, match="session_uuid is only valid"):
+        build_simulation_request_proto(
+            scene_ids=("scene_a",),
+            n_generation=2,
+            driver_host="localhost",
+            driver_port=50052,
+            n_concurrent_per_driver=1,
+            session_uuid="abc-123",
+        )
+
+
+def test_policy_input_from_tick_buffer_surfaces_buffered_observations() -> None:
+    """Snapshots tick-local + sticky proto fields into a populated PolicyInput."""
+    calibration: RolloutCalibration = ()
+    tick_buffer = TickBuffer(
+        camera_images=[
+            RolloutCameraImage.CameraImage(
+                logical_id="front",
+                image_bytes=b"abc",
+                frame_end_us=99,
+            )
+        ],
+        ego_trajectory=cast(
+            Any,
+            SimpleNamespace(
+                poses=[
+                    SimpleNamespace(
+                        timestamp_us=90,
+                        pose=SimpleNamespace(
+                            vec=SimpleNamespace(x=1.0, y=2.0, z=3.0),
+                            quat=SimpleNamespace(w=1.0, x=0.0, y=0.0, z=0.0),
+                        ),
+                    )
+                ]
+            ),
+        ),
+        route=Route(
+            timestamp_us=80,
+            waypoints=[
+                SimpleNamespace(x=10.0, y=20.0, z=0.0),
+                SimpleNamespace(x=11.0, y=21.0, z=0.0),
+            ],
+        ),
+    )
+
+    policy_input = policy_input_from_tick_buffer(
+        step_index=3,
+        time_now_us=100,
+        time_query_us=200,
+        calibration=calibration,
+        tick_buffer=tick_buffer,
+    )
+
+    assert policy_input.step_index == 3
+    assert policy_input.time_now_us == 100
+    assert policy_input.time_query_us == 200
+    assert policy_input.calibration is calibration
+    assert len(policy_input.camera_images) == 1
+    assert policy_input.camera_images[0].logical_id == "front"
+    assert policy_input.camera_images[0].image_bytes == b"abc"
+    assert policy_input.ego_trajectory.poses[0].pose.vec.x == 1.0
+    assert policy_input.route_timestamp_us == 80
+    assert policy_input.route_waypoints[1].y == 21.0
+
+
+def test_policy_input_from_tick_buffer_rejects_missing_ego_trajectory() -> None:
+    """Refuses to build a `PolicyInput` when AlpaSim has not submitted ego data."""
+    with pytest.raises(ValueError, match="has no ego trajectory"):
+        policy_input_from_tick_buffer(
+            step_index=0,
+            time_now_us=10,
+            time_query_us=20,
+            calibration=(),
+            tick_buffer=TickBuffer(),
+        )
+
+
+def test_policy_input_from_tick_buffer_allows_empty_cameras() -> None:
+    """Buffers without cameras still yield a `PolicyInput` once ego and route are set."""
+    policy_input = policy_input_from_tick_buffer(
+        step_index=0,
+        time_now_us=10,
+        time_query_us=20,
+        calibration=(),
+        tick_buffer=TickBuffer(
+            ego_trajectory=cast(
+                Any,
+                SimpleNamespace(
+                    poses=[
+                        SimpleNamespace(
+                            timestamp_us=10,
+                            pose=SimpleNamespace(
+                                vec=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+                                quat=SimpleNamespace(w=1.0, x=0.0, y=0.0, z=0.0),
+                            ),
+                        )
+                    ]
+                ),
+            ),
+            route=Route(
+                timestamp_us=5,
+                waypoints=[SimpleNamespace(x=0.0, y=0.0, z=0.0)],
+            ),
+        ),
+    )
+
+    assert policy_input.camera_images == ()
+    assert len(policy_input.ego_trajectory.poses) == 1
+    assert policy_input.ego_trajectory.poses[0].timestamp_us == 10
+    assert policy_input.route_timestamp_us == 5
+    assert policy_input.route_waypoints[0].x == 0.0
+
+
+def test_policy_input_from_tick_buffer_rejects_missing_route() -> None:
+    """Refuses to build a `PolicyInput` when AlpaSim has not submitted a route."""
+    with pytest.raises(ValueError, match="has no route"):
+        policy_input_from_tick_buffer(
+            step_index=0,
+            time_now_us=10,
+            time_query_us=20,
+            calibration=(),
+            tick_buffer=TickBuffer(
+                ego_trajectory=cast(
+                    Any,
+                    SimpleNamespace(
+                        poses=[
+                            SimpleNamespace(
+                                timestamp_us=10,
+                                pose=SimpleNamespace(
+                                    vec=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+                                    quat=SimpleNamespace(w=1.0, x=0.0, y=0.0, z=0.0),
+                                ),
+                            )
+                        ]
+                    ),
+                ),
+            ),
+        )
+
+
+def test_ground_truth_from_proto_carries_trajectory_and_anchor_timestamp() -> None:
+    """Forwards trajectory poses and the rig anchor timestamp into `GroundTruth`."""
+    proto = GroundTruth(
+        trajectory=cast(
+            Any,
+            SimpleNamespace(
+                poses=[
+                    SimpleNamespace(
+                        timestamp_us=70,
+                        pose=SimpleNamespace(
+                            vec=SimpleNamespace(x=5.0, y=6.0, z=7.0),
+                            quat=SimpleNamespace(w=1.0, x=0.0, y=0.0, z=0.0),
+                        ),
+                    )
+                ]
+            ),
+        ),
+        timestamp_us=12345,
+    )
+
+    ground_truth = ground_truth_from_proto(proto)
+
+    assert ground_truth.timestamp_us == 12345
+    assert ground_truth.ego_trajectory.poses[0].pose.vec.z == 7.0
+
+
+def test_drive_response_from_policy_output_anchors_at_current_ego_pose() -> None:
+    """Serializes policy-owned trajectory rows, including the current-pose row."""
+    policy_input = policy_input_from_tick_buffer(
+        step_index=0,
+        time_now_us=1_000,
+        time_query_us=400_000,
+        calibration=(),
+        tick_buffer=TickBuffer(
+            ego_trajectory=cast(
+                Any,
+                SimpleNamespace(
+                    poses=[
+                        SimpleNamespace(
+                            timestamp_us=1_000,
+                            pose=SimpleNamespace(
+                                vec=SimpleNamespace(x=10.0, y=20.0, z=30.0),
+                                quat=SimpleNamespace(w=1.0, x=0.0, y=0.0, z=0.0),
+                            ),
+                        )
+                    ]
+                ),
+            ),
+            route=Route(
+                timestamp_us=1_000,
+                waypoints=[SimpleNamespace(x=0.0, y=0.0, z=0.0)],
+            ),
+        ),
+    )
+    chosen_xyz = torch.tensor(
+        [[10.0, 20.0, 30.0], [11.0, 22.0, 33.0], [14.0, 25.0, 36.0]],
+        dtype=torch.float32,
+    )
+    chosen_quat = torch.tensor(
+        [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
+        dtype=torch.float32,
+    )
+    chosen_dt_us = torch.tensor([0, 100_000, 200_000], dtype=torch.int64)
+    output = PolicyOutput(
+        chosen_xyz=chosen_xyz,
+        chosen_quat=chosen_quat,
+        chosen_dt_us=chosen_dt_us,
+    )
+
+    response = drive_response_from_policy_output(policy_input, output)
+
+    timestamps = [pose.timestamp_us for pose in response.trajectory.poses]
+    assert timestamps == [1_000, 101_000, 201_000]
+    assert response.trajectory.poses[0].pose.vec.x == 10.0
+    assert response.trajectory.poses[0].pose.vec.y == 20.0
+    assert response.trajectory.poses[0].pose.vec.z == 30.0
+    assert response.trajectory.poses[1].pose.vec.x == 11.0
+    assert response.trajectory.poses[2].pose.vec.z == 36.0
+    assert response.trajectory.poses[2].pose.quat.y == 1.0
+
+
+def test_drive_response_from_policy_output_rejects_mismatched_leading_dims() -> None:
+    """Rejects chosen tensors with mismatched `[T]` leading dims."""
+    policy_input = policy_input_from_tick_buffer(
+        step_index=0,
+        time_now_us=0,
+        time_query_us=1,
+        calibration=(),
+        tick_buffer=TickBuffer(
+            ego_trajectory=cast(
+                Any,
+                SimpleNamespace(
+                    poses=[
+                        SimpleNamespace(
+                            timestamp_us=0,
+                            pose=SimpleNamespace(
+                                vec=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+                                quat=SimpleNamespace(w=1.0, x=0.0, y=0.0, z=0.0),
+                            ),
+                        )
+                    ]
+                ),
+            ),
+            route=Route(
+                timestamp_us=0,
+                waypoints=[SimpleNamespace(x=0.0, y=0.0, z=0.0)],
+            ),
+        ),
+    )
+    chosen_xyz = torch.zeros(4, 3, dtype=torch.float32)
+    chosen_quat = torch.zeros(4, 4, dtype=torch.float32)
+    chosen_quat[:, 0] = 1.0
+    chosen_dt_us = torch.tensor([1, 2, 3], dtype=torch.int64)
+    output = PolicyOutput(
+        chosen_xyz=chosen_xyz,
+        chosen_quat=chosen_quat,
+        chosen_dt_us=chosen_dt_us,
+    )
+
+    with pytest.raises(ValueError, match="Mismatched leading dims"):
+        drive_response_from_policy_output(policy_input, output)

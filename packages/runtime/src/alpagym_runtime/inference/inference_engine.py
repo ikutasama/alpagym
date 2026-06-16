@@ -1,0 +1,161 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Cross-session batched dispatcher into an ``InferenceModel``.
+
+Producers (per-session policy threads) call ``InferenceEngine.infer`` and
+block on the returned ``concurrent.futures.Future``. A single worker thread
+runs ``InferenceEngine.run_loop``, which blocks for the first queued request,
+opportunistically drains additional requests up to ``max_batch_size``, runs
+one batched forward pass, and resolves each future with its per-call
+``ModelOutput``.
+
+Forward-pass exceptions are unrecoverable: under streaming dispatch the
+engine thread is long-lived and shared across overlapping rollouts, so
+``run_loop`` logs the traceback and exits the process via ``os._exit(1)``
+instead of attempting soft recovery. Cosmos-RL's controller detects the
+dead rollout replica through heartbeat timeout and triggers mesh rebuild
+on the surviving replicas.
+"""
+
+import logging
+import os
+import queue
+import sys
+from concurrent.futures import Future
+from dataclasses import dataclass
+from typing import Final
+
+import torch
+from alpagym_host.config import SamplingParamsConfig
+
+from alpagym_runtime.perf.instrument.scope import timed_scope
+from alpagym_runtime.replay import ActionSelection, PolicyReplayData
+
+from .types import BatchedModelInput, BatchedModelOutput, InferenceModel, ModelInput, ModelOutput
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingRequest:
+    """One queued inference call: input plus the future to resolve."""
+
+    model_input: ModelInput
+    result: Future[ModelOutput]
+
+
+class _Shutdown:
+    """Sentinel posted by ``shutdown()`` to terminate ``run_loop``."""
+
+
+_SHUTDOWN: Final[_Shutdown] = _Shutdown()
+
+
+class InferenceEngine:
+    """Queue-based batched dispatcher into one `InferenceModel`."""
+
+    def __init__(
+        self,
+        inference_model: InferenceModel,
+        sampling: SamplingParamsConfig,
+        return_trace_for_rl: bool,
+        max_batch_size: int,
+    ) -> None:
+        """Wire the dispatcher with its model and batching settings."""
+        self._inference_model = inference_model
+        self._sampling_config = sampling
+        self._return_trace_for_rl = return_trace_for_rl
+        self._max_batch_size = max_batch_size
+        self._queue: queue.SimpleQueue[_PendingRequest | _Shutdown] = queue.SimpleQueue()
+
+    def infer(self, model_input: ModelInput) -> Future[ModelOutput]:
+        """Enqueue one `ModelInput` and return its result handle."""
+        future: Future[ModelOutput] = Future()
+        self._queue.put(_PendingRequest(model_input=model_input, result=future))
+        return future
+
+    def build_policy_replay_data(
+        self,
+        model_input: ModelInput,
+        model_output: ModelOutput,
+        action_selection: ActionSelection,
+    ) -> PolicyReplayData:
+        """Return the selected-action ``PolicyReplayData`` envelope for trainer-side scoring."""
+        return self._inference_model.build_policy_replay_data(
+            model_input=model_input,
+            model_output=model_output,
+            action_selection=action_selection,
+        )
+
+    def get_model(self) -> torch.nn.Module:
+        """Return the rollout-serving model object."""
+        return self._inference_model.get_model()
+
+    def set_model(self, model: torch.nn.Module) -> None:
+        """Forward Cosmos weight-sync replacement into the rollout-serving model."""
+        self._inference_model.set_model(model)
+
+    def run_loop(self) -> None:
+        """Drain the queue and dispatch batches until shutdown drains it."""
+        while True:
+            # --- Phase 1: collect a batch ---
+            # Block for the first item; opportunistically drain the rest.
+            first = self._queue.get()
+            if isinstance(first, _Shutdown):
+                return
+            batch: list[_PendingRequest] = [first]
+            saw_shutdown = False
+            while len(batch) < self._max_batch_size:
+                try:
+                    item = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                if isinstance(item, _Shutdown):
+                    saw_shutdown = True
+                    break
+                batch.append(item)
+
+            # --- Phase 2: dispatch through the model ---
+            # Forward-pass exceptions kill the process; see module docstring.
+            try:
+                model_inputs = [req.model_input for req in batch]
+                batched_model_input = BatchedModelInput.stack(model_inputs)
+                with timed_scope(
+                    "rollout/inference_forward", category="compute_gpu_wall", gpu_snapshot=True
+                ):
+                    batched_model_output: BatchedModelOutput = (
+                        self._inference_model.sample_trajectories_from_data(
+                            batched_model_input,
+                            self._sampling_config,
+                            return_trace_for_rl=self._return_trace_for_rl,
+                        )
+                    )
+                model_outputs = batched_model_output.unbind()
+                if len(model_outputs) != len(model_inputs):
+                    raise ValueError(
+                        f"InferenceEngine: {len(model_outputs)} ModelOutput(s) returned for "
+                        f"{len(model_inputs)} ModelInput(s)"
+                    )
+            except BaseException:
+                logger.exception("InferenceEngine forward pass failed; killing process")
+                from alpagym_runtime.perf.instrument.store import try_get_perf_store
+
+                store = try_get_perf_store()
+                if store is not None:
+                    try:
+                        store.write_atomic()
+                    except Exception:
+                        logger.exception("InferenceEngine failed to flush perf artifact")
+                sys.stderr.flush()
+                os._exit(1)
+
+            # --- Phase 3: resolve futures and honour shutdown ---
+            for req, model_output in zip(batch, model_outputs, strict=True):
+                req.result.set_result(model_output)
+            if saw_shutdown:
+                return
+
+    def shutdown(self) -> None:
+        """Signal `run_loop` to return once the queue drains."""
+        self._queue.put(_SHUTDOWN)

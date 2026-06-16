@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=64.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alpagym-runtime"
+version = "0.1.0"
+dependencies = [
+  "alpagym-host",
+  "alpagym-plugins",
+  "alpamayo-recipes",
+  "cosmos-rl[rl,wfm]",
+  "einops",
+  "flash-attn==2.8.3",
+  "grpcio",
+  "grouped-gemm @ git+https://github.com/fanshiqing/grouped_gemm@v1.1.4",
+  "nvidia-ml-py",
+  "psutil",
+  "torch==2.8.0",
+  "torchao>=0.10.0,<0.16.0",
+  "torchaudio>=2.7.1",
+  "torchvision>=0.22.1",
+  "wandb>0.13.1",
+  "alpasim-grpc",
+]
+
+[project.scripts]
+check-policy-bundles = "alpagym_runtime.policies.check_policy_bundles:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

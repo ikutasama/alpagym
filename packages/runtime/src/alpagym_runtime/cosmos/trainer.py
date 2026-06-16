@@ -1,0 +1,628 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""GRPO trainer for AlpaGym closed-loop training.
+
+The trainer is policy-agnostic: per-policy tokenizer resolution and data
+packer construction are looked up via the
+``alpagym_runtime.policies.registry`` bundle for the configured
+policy kind string. The cosmos entrypoint dispatches the data packer the same way.
+"""
+
+import copy
+import logging
+import os
+from typing import Any
+
+import torch
+from alpagym_host.config import RunConfig, load_run_config
+from cosmos_rl.dispatcher.data import schema as _rollout_schema
+from cosmos_rl.policy import config as _cosmos_config
+from cosmos_rl.policy.trainer import base as _trainer_base
+from cosmos_rl.policy.trainer.llm_trainer import grpo_trainer as _grpo_trainer
+from cosmos_rl.utils import distributed as dist_util, parallelism as _parallelism
+
+from alpagym_runtime.cosmos.replay_objective import (
+    assert_replay_shapes,
+    compute_kl_penalty,
+    compute_ppo_surrogate,
+)
+from alpagym_runtime.cosmos.rollout_filter import filter_trainable_rollouts
+from alpagym_runtime.perf.instrument.lifecycle import initialize_perf
+from alpagym_runtime.perf.instrument.marker import record_perf_marker
+from alpagym_runtime.perf.instrument.scope import measure_perf
+from alpagym_runtime.policies.registry import get_policy_bundle
+from alpagym_runtime.tensor_utils import to_device_recursive
+
+logger = logging.getLogger(__name__)
+
+
+def _load_run_config(config: _cosmos_config.Config) -> RunConfig:
+    """Return the resolved AlpaGym run config referenced by ``config``.
+
+    The cosmos ``Config`` carries the resolved AlpaGym config path under
+    ``custom.resolved_config_path``. Raises when the path is absent - every
+    production cosmos invocation passes it via ``--config``.
+    """
+    custom = getattr(config, "custom", None) or {}
+    resolved_config_path = custom.get("resolved_config_path") if hasattr(custom, "get") else None
+    if not resolved_config_path:
+        raise ValueError(
+            "Cosmos config missing custom.resolved_config_path; cannot load "
+            "AlpaGym run config. Production cosmos invocations set this via --config."
+        )
+    return load_run_config(resolved_config_path)
+
+
+@_trainer_base.TrainerRegistry.register(trainer_type="alpagym_grpo")
+class AlpagymGRPOTrainer(_grpo_trainer.GRPOTrainer):
+    """GRPO trainer that replaces Cosmos's text-token loss with AlpaGym replay training.
+
+    Consumes AlpaGym rollout artifact completions, recomputes logprobs for each
+    recorded selected action, and applies the PPO/GRPO replay objective. The
+    step is the minibatching unit: all rollouts are flattened into one pool of
+    per-step replay samples, shuffled, then split into minibatches.
+
+    Forward contract for ``self.model``:
+
+        model(
+            **model_inputs,                # whatever the policy's data packer collated
+            teacher_model: nn.Module | None,
+        ) -> {
+            "log_probs": Tensor[R],        # current logprob for recorded action
+            "kl_div":    Tensor[R] | None,
+        }
+
+    ``kl_div`` (when present) is one scalar per replay row; the trainer excludes
+    padded rows before reducing KL. Additional return keys are allowed but
+    ignored by the trainer.
+
+    ``PolicyOutput.replay_data`` must carry a ``PolicyReplayData`` envelope.
+    The packer raises before collation if the payload family, old rollout
+    logprob, selected action data, or required trace fields are missing.
+    """
+
+    def __init__(
+        self,
+        config: _cosmos_config.Config,
+        parallel_dims: _parallelism.ParallelDims,
+        **kwargs: Any,
+    ) -> None:
+        """Initialize the trainer.
+
+        Args:
+            config: Cosmos-RL config; reads `train.train_policy.*` hyperparams
+                and `policy.model_name_or_path` for the policy bundle.
+            parallel_dims: Cosmos-RL parallelism description.
+            **kwargs: Forwarded to `GRPOTrainer.__init__`
+                (`train_stream`, `data_packer`, `val_data_packer`, ...).
+        """
+        # Loaded once and reused for perf init and the policy-bundle lookup below.
+        # Production cosmos invocations always set `custom.resolved_config_path` via
+        # `--config`.
+        run_config = _load_run_config(config)
+        initialize_perf(run_config)
+        # Cosmos's super-init resolves a tokenizer from
+        # ``config.policy.model_name_or_path`` and calls ``ModelRegistry.build_model``.
+        # Policy bundles whose path lacks tokenizer files need that resolution
+        # against a per-bundle location, and need their model
+        # registered with cosmos beforehand; the registered bundle's
+        # ``setup_tokenizer`` handles both.
+        bundle = get_policy_bundle(run_config.policy.model.kind)
+        bundle_tokenizer = bundle.setup_tokenizer(config)
+        if bundle_tokenizer is not None:
+            self.tokenizer = bundle_tokenizer
+
+        super().__init__(config=config, parallel_dims=parallel_dims, **kwargs)
+
+        grpo_config = config.train.train_policy
+        if not isinstance(grpo_config, _cosmos_config.GrpoConfig):
+            raise TypeError("config.train.train_policy must be GrpoConfig.")
+        self._grpo_ratio_clip_low: float = float(grpo_config.epsilon_low)
+        self._grpo_ratio_clip_high: float = float(grpo_config.epsilon_high)
+        self._grpo_optimization_iterations: int = int(grpo_config.mu_iterations)
+        self._mini_batch: int = int(grpo_config.mini_batch)
+        self._kl_beta: float = float(grpo_config.kl_beta)
+        self._allowed_outdated_steps: int = int(grpo_config.allowed_outdated_steps)
+        # Cosmos optionally allows reference_reset_interval=None to mean "never";
+        # collapse to 0 for an integer-only branch in `_reference_reset`.
+        reset_interval = grpo_config.reference_reset_interval
+        self._reference_reset_interval: int = 0 if reset_interval is None else int(reset_interval)
+        # GRPO groups one prompt's rollouts together; that count lives on the
+        # rollout config in Cosmos.
+        self._group_size: int = int(config.rollout.n_generation)
+
+        self._reference_model: Any = None
+        record_perf_marker("trainer/ready", cpu_snapshot=True, gpu_snapshot=True)
+
+    @measure_perf(
+        "trainer/step",
+        category="compute_gpu_wall",
+        cpu_snapshot=True,
+        gpu_snapshot=True,
+    )
+    def step_training(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self,
+        rollouts: list[_rollout_schema.Rollout],
+        current_step: int,
+        total_steps: int,
+        remain_samples_num: int,
+        inter_policy_nccl: dist_util.HighAvailabilitylNccl,
+        is_master_replica: bool,
+        do_save_checkpoint: bool = False,
+    ) -> dict[str, float | int]:
+        """Run one GRPO step over the rollouts Cosmos provides.
+
+        Filters stale rollouts, builds per-step samples via the data packer,
+        runs ``grpo_optimization_iterations × num_mini_batches`` PPO updates, and returns
+        the metrics dict Cosmos reports.
+
+        Args:
+            rollouts: Cosmos-RL rollouts; each carries ``prompt``,
+                ``completion`` (artifact path), ``advantage``, and
+                ``weight_version``.
+            current_step: Current training step index.
+            total_steps: Total configured training steps.
+            remain_samples_num: Remaining samples reported by Cosmos-RL; forwarded
+                to the checkpoint manager so resume restores the same data pointer.
+            inter_policy_nccl: NCCL communicator across DP replicas.
+            is_master_replica: Whether this is the master policy replica; only
+                the master writes checkpoints.
+            do_save_checkpoint: Whether Cosmos-RL requested checkpointing this step.
+
+        Returns:
+            Dict of training metrics for Cosmos to log.
+        """
+        logger.info(
+            "AlpaGym trainer step start current_step=%d total_steps=%d received_rollouts=%d "
+            "group_size=%d mini_batch=%d grpo_optimization_iterations=%d "
+            "is_master_replica=%s do_save_checkpoint=%s",
+            current_step,
+            total_steps,
+            len(rollouts),
+            self._group_size,
+            self._mini_batch,
+            self._grpo_optimization_iterations,
+            is_master_replica,
+            do_save_checkpoint,
+        )
+        rollouts = filter_trainable_rollouts(
+            rollouts,
+            current_step=current_step,
+            train_batch_per_replica=int(self.config.train.train_batch_per_replica),
+            allowed_outdated_steps=self._allowed_outdated_steps,
+        )
+        samples, advantages = self._prepare_training_data(rollouts)
+        if not samples:
+            raise ValueError(
+                "AlpaGym trainer step has no trainable samples after filtering: "
+                f"current_step={current_step}"
+            )
+
+        (
+            total_loss,
+            total_kl,
+            num_batches,
+            ratio_max,
+            ratio_min,
+            clip_fraction_sum,
+            grad_norm_sum,
+        ) = self._run_training_loop(samples, advantages, inter_policy_nccl)
+        self.lr_schedulers.step()
+        if is_master_replica and do_save_checkpoint:
+            self._save_checkpoint(current_step, total_steps, remain_samples_num)
+        self._reference_reset(current_step)
+
+        avg_loss = total_loss / num_batches if num_batches else 0.0
+        avg_kl = total_kl / num_batches if num_batches else 0.0
+        if (
+            self.parallel_dims.dp_replicate_enabled
+            or self.parallel_dims.dp_shard_enabled
+            or self.parallel_dims.cp_enabled
+        ):
+            loss_tensor = torch.tensor(avg_loss, device=self.device)
+            global_avg_loss = float(
+                dist_util.dist_mean(loss_tensor, self.parallel_dims.mesh["dp_cp"])
+            )
+            global_max_loss = float(
+                dist_util.dist_max(loss_tensor, self.parallel_dims.mesh["dp_cp"])
+            )
+        else:
+            global_avg_loss = global_max_loss = avg_loss
+
+        metrics = {
+            "train_step": current_step,
+            "train/loss_avg": global_avg_loss,
+            "train/loss_max": global_max_loss,
+            "train/kl_avg": avg_kl,
+            "train/learning_rate": float(self.lr_schedulers.get_last_lr()[0]),
+            "train/num_batches": num_batches,
+            "train/ratio_max": ratio_max,
+            "train/ratio_min": ratio_min,
+            "train/clip_fraction": clip_fraction_sum / num_batches if num_batches else 0.0,
+            "train/grad_norm": grad_norm_sum / num_batches if num_batches else 0.0,
+            "train/iteration_time": 0.0,
+        }
+        logger.info(
+            "AlpaGym trainer step end current_step=%d steps=%d batches=%d "
+            "loss_avg=%.6f kl_avg=%.6f ratio_min=%.6f ratio_max=%.6f "
+            "clip_fraction=%.6f grad_norm=%.6f lr=%.8g",
+            current_step,
+            len(samples),
+            num_batches,
+            float(metrics["train/loss_avg"]),
+            avg_kl,
+            ratio_min,
+            ratio_max,
+            float(metrics["train/clip_fraction"]),
+            float(metrics["train/grad_norm"]),
+            float(metrics["train/learning_rate"]),
+        )
+        return metrics
+
+    # ------------------------------------------------------------------
+    # GRPO orchestration
+    # ------------------------------------------------------------------
+
+    def _prepare_training_data(
+        self,
+        rollouts: list[_rollout_schema.Rollout],
+    ) -> tuple[list[Any], torch.Tensor]:
+        """Flatten rollouts into a single pool of per-step samples plus advantages.
+
+        Each rollout's artifact unpacks into a fixed-length list of single-step
+        replay samples (valid steps plus ``is_padding`` rows); the trainer
+        extends one flat pool across all rollouts and records the matching
+        per-step advantage. Cosmos supplies one advantage per rollout, replayed
+        across that rollout's valid steps; padding steps carry zero so they
+        contribute no policy gradient.
+
+        Args:
+            rollouts: Cosmos-RL rollouts surviving the staleness filter.
+
+        Returns:
+            Tuple ``(samples, advantages)`` aligned row-for-row: ``samples`` is
+            the flat per-step pool, ``advantages`` the per-step advantage.
+        """
+        samples: list[Any] = []
+        advantages: list[float] = []
+        for rollout in rollouts:
+            step_samples = self.data_packer.get_policy_input(
+                rollout.prompt,
+                rollout.completion,
+                n_ignore_prefix_tokens=rollout.n_ignore_prefix_tokens,
+            )
+            for step in step_samples:
+                is_padding = bool(step.training_signal.is_padding.item())
+                advantages.append(0.0 if is_padding else float(rollout.advantage))
+            samples.extend(step_samples)
+        return samples, torch.tensor(advantages, dtype=torch.float32)
+
+    def _run_training_loop(
+        self,
+        samples: list[Any],
+        advantages: torch.Tensor,
+        inter_policy_nccl: dist_util.HighAvailabilitylNccl,
+    ) -> tuple[float, float, int, float, float, float]:
+        """Run ``grpo_optimization_iterations × num_mini_batches`` PPO updates.
+
+        Minibatching is at the step level: ``samples`` is the flattened pool of
+        per-step replay samples across all rollouts, shuffled fresh each
+        optimization iteration and split into minibatches. The collate step
+        stacks one minibatch of single-step samples into the ``[B, ...]`` inputs
+        the model forward sees.
+
+        Returns:
+            Aggregates: ``(total_loss, total_kl, num_batches, ratio_max,
+            ratio_min, clip_fraction_sum, grad_norm_sum)``.
+        """
+        self._ensure_reference_model()
+
+        num_steps = len(samples)
+        mini_batch_size = min(self._mini_batch, num_steps)
+        num_mini_batches = (num_steps + mini_batch_size - 1) // mini_batch_size
+
+        total_loss = 0.0
+        total_kl = 0.0
+        num_batches = 0
+        ratio_max = float("-inf")
+        ratio_min = float("inf")
+        clip_fraction_sum = 0.0
+        grad_norm_sum = 0.0
+
+        for _ in range(self._grpo_optimization_iterations):
+            indices = torch.randperm(num_steps)
+            for minibatch_index in range(num_mini_batches):
+                start = minibatch_index * mini_batch_size
+                end = min(start + mini_batch_size, num_steps)
+                minibatch_indices = indices[start:end]
+                minibatch_samples = [samples[int(index)] for index in minibatch_indices]
+                minibatch_advantages = advantages[minibatch_indices]
+
+                (
+                    loss_value,
+                    kl_value,
+                    batch_ratio_max,
+                    batch_ratio_min,
+                    batch_clip_fraction,
+                    batch_grad_norm,
+                ) = self._train_minibatch(
+                    minibatch_samples,
+                    minibatch_advantages,
+                    inter_policy_nccl,
+                )
+                total_loss += loss_value
+                total_kl += kl_value
+                num_batches += 1
+                ratio_max = max(ratio_max, batch_ratio_max)
+                ratio_min = min(ratio_min, batch_ratio_min)
+                clip_fraction_sum += batch_clip_fraction
+                grad_norm_sum += batch_grad_norm
+
+        if num_batches == 0:
+            ratio_max = 0.0
+            ratio_min = 0.0
+        return (
+            total_loss,
+            total_kl,
+            num_batches,
+            ratio_max,
+            ratio_min,
+            clip_fraction_sum,
+            grad_norm_sum,
+        )
+
+    def _train_minibatch(
+        self,
+        minibatch_samples: list[Any],
+        minibatch_advantages: torch.Tensor,
+        inter_policy_nccl: dist_util.HighAvailabilitylNccl,
+    ) -> tuple[float, float, float, float, float, float]:
+        """Train on a single step-level minibatch and apply gradient.
+
+        Orchestrates: collate the per-step samples, forward the full minibatch,
+        compute PPO surrogate + KL penalty, backward + optimizer step, emit
+        metrics. Padding rows are forwarded like any other (so every DP worker
+        runs the identical model forward in lockstep) but are neutralized: their
+        advantage is zero (no policy-loss gradient) and they are masked out of
+        the KL term and the diagnostics.
+
+        Args:
+            minibatch_samples: one single-step replay sample per row.
+            minibatch_advantages: ``[B]`` per-step advantages (zero on padding
+                rows), aligned row-for-row with ``minibatch_samples``.
+            inter_policy_nccl: NCCL communicator across DP replicas.
+
+        Returns:
+            Tuple ``(loss, kl_value, ratio_max, ratio_min, clip_fraction)``.
+        """
+        minibatch = self.data_packer.policy_collate_fn(minibatch_samples)
+        is_padding = minibatch.training_signal.is_padding.to(self.device)
+        old_logprobs = minibatch.training_signal.old_logprobs.to(self.device)
+        advantages = minibatch_advantages.to(device=self.device, dtype=torch.float32)
+        new_logprobs, kl_div = self._forward_with_reference(minibatch.model_inputs)
+        assert_replay_shapes(new_logprobs, old_logprobs, advantages, kl_div)
+        policy_loss, ratio = compute_ppo_surrogate(
+            new_logprobs,
+            old_logprobs,
+            advantages,
+            ratio_clip_low=self._grpo_ratio_clip_low,
+            ratio_clip_high=self._grpo_ratio_clip_high,
+            is_padding=is_padding,
+        )
+        kl_loss = compute_kl_penalty(
+            kl_div,
+            is_padding,
+            kl_beta=self._kl_beta,
+            device=self.device,
+        )
+        loss = policy_loss + kl_loss
+
+        self.optimizers.zero_grad()
+        loss.backward()
+        grad_norm = self.all_reduce_states(inter_policy_nccl)
+
+        return self._minibatch_metrics(
+            policy_loss=policy_loss,
+            kl_loss=kl_loss,
+            ratio=ratio,
+            is_padding=is_padding,
+            advantages=advantages,
+            old_logprobs=old_logprobs,
+            new_logprobs=new_logprobs,
+            grad_norm=grad_norm,
+        )
+
+    def _forward_with_reference(
+        self,
+        model_inputs: dict[str, Any],
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Run the model forward with the reference model attached for KL."""
+        forward_kwargs = to_device_recursive(model_inputs, self.device)
+        if self._reference_model is not None:
+            forward_kwargs["teacher_model"] = self._reference_model
+        result = self.model(**forward_kwargs)
+        return result["log_probs"], result.get("kl_div")
+
+    def _minibatch_metrics(
+        self,
+        policy_loss: torch.Tensor,
+        kl_loss: torch.Tensor,
+        ratio: torch.Tensor,
+        is_padding: torch.Tensor,
+        advantages: torch.Tensor,
+        old_logprobs: torch.Tensor,
+        new_logprobs: torch.Tensor,
+        grad_norm: float,
+    ) -> tuple[float, float, float, float, float, float]:
+        """Compute ratio/clip diagnostics over the valid (non-padding) rows.
+
+        ``_train_minibatch`` forwards the full minibatch, so the ratio/clip
+        diagnostics mask out padding rows here; an all-padding minibatch has no
+        valid rows and reports neutral defaults.
+        """
+        valid_mask = ~is_padding
+        loss_value = float((policy_loss + kl_loss).item())
+        with torch.no_grad():
+            valid_ratio = ratio[valid_mask]
+            if valid_ratio.numel() == 0:
+                clip_fraction = 0.0
+                batch_ratio_max = 1.0
+                batch_ratio_min = 1.0
+                advantage_mean = 0.0
+            else:
+                clipped = (valid_ratio < 1.0 - self._grpo_ratio_clip_low) | (
+                    valid_ratio > 1.0 + self._grpo_ratio_clip_high
+                )
+                clip_fraction = float(clipped.float().mean().item())
+                batch_ratio_max = float(valid_ratio.max().item())
+                batch_ratio_min = float(valid_ratio.min().item())
+                advantage_mean = float(advantages[valid_mask].mean().item())
+        logger.info(
+            "AlpaGym trainer minibatch rows=%d valid_rows=%d loss=%.6f "
+            "policy_loss=%.6f kl_loss=%.6f ratio_min=%.6f ratio_max=%.6f "
+            "clip_fraction=%.6f advantage_mean=%.6f old_logprob_mean=%.6f "
+            "new_logprob_mean=%.6f grad_norm=%.6f",
+            int(old_logprobs.numel()),
+            int(valid_mask.sum().item()),
+            loss_value,
+            float(policy_loss.item()),
+            float(kl_loss.item()),
+            batch_ratio_min,
+            batch_ratio_max,
+            clip_fraction,
+            advantage_mean,
+            float(old_logprobs.mean().item()),
+            float(new_logprobs.mean().item()),
+            grad_norm,
+        )
+        return (
+            loss_value,
+            float(kl_loss.item()),
+            batch_ratio_max,
+            batch_ratio_min,
+            clip_fraction,
+            grad_norm,
+        )
+
+    def all_reduce_states(self, inter_policy_nccl: dist_util.HighAvailabilitylNccl) -> float:
+        """Reduce gradients across DP replicas, clip norm, and step optimizer.
+
+        Override of `GRPOTrainer.all_reduce_states`. Three differences:
+        - Iterates `self.model.parameters()` directly rather than
+          `self.model_parts`. Some policy wrappers keep trainable parameters
+          under nested child modules, so `model_parts` may not carry the right
+          param refs.
+        - Captures `current_stream` BEFORE entering the `train_stream`
+          context so the all-reduce on `train_stream` waits for FSDP's
+          reduce-scatter on the default stream.
+        - Raises on a non-finite reduced gradient and skips the step on a zero
+          one. Both checks run after the cross-replica reduce, so every DP
+          worker reaches the same verdict in lockstep.
+        """
+        backward_stream = torch.cuda.current_stream()
+        with torch.cuda.stream(self.train_stream):
+            self.train_stream.wait_stream(backward_stream)
+            params = [param for param in self.model.parameters() if param.requires_grad]
+            if params:
+                dist_util.gradient_reduce_across_dp_replicas_(params, inter_policy_nccl)
+            grads = [param.grad for param in params if param.grad is not None]
+            if grads and not torch.stack(torch._foreach_norm(grads)).sum().isfinite():
+                raise FloatingPointError(
+                    "[GRPO:grad-guard] non-finite reduced gradient after backward"
+                )
+            grad_norm = dist_util.gradient_norm_clipping(
+                params,
+                self.config.train.optm_grad_norm_clip,
+                foreach=True,
+                pp_mesh=(self.parallel_dims.mesh["pp"] if self.parallel_dims.pp_enabled else None),
+                return_norm_only=(self.config.train.optm_grad_norm_clip <= 0.0),
+            )
+            grad_norm_value = float(grad_norm) if grad_norm is not None else 0.0
+            # Skip the optimizer step on a zero gradient (all-padding or
+            # zero-advantage minibatch) so weight decay / Adam state do not
+            # advance on no signal.
+            if grad_norm_value != 0.0:
+                self.optimizers.step()
+            self.optimizers.zero_grad()
+        return grad_norm_value
+
+    # ------------------------------------------------------------------
+    # Checkpointing
+    # ------------------------------------------------------------------
+
+    def _save_checkpoint(
+        self,
+        current_step: int,
+        total_steps: int,
+        remain_samples_num: int,
+    ) -> None:
+        """Save policy weights at ``current_step``.
+
+        Mirrors the upstream ``GRPOTrainer.step_training`` checkpoint block:
+        exports HuggingFace-compatible safetensors when
+        ``config.train.ckpt.export_safetensors`` is set (always on the final
+        step), then writes the cosmos resume checkpoint (model + optimizer +
+        scheduler + ``remain_samples_num``) via ``self.ckpt_manager``.
+
+        The inherited ``ckpt_manager`` and ``export_safetensors`` come from
+        ``LLMTrainer``; ``output_dir`` / ``ckpt`` / ``param_dtype`` come from
+        ``cosmos_config.toml``.
+        """
+        is_last_step = current_step == total_steps
+        if is_last_step or self.config.train.ckpt.export_safetensors:
+            logger.info(
+                "[Policy] Saving huggingface checkpoint at step %d to %s",
+                current_step,
+                self.config.train.output_dir,
+            )
+            self.export_safetensors(
+                output_dir=self.config.train.output_dir,
+                rel_path=os.path.join("safetensors", f"step_{current_step}"),
+                trainable_only=False,
+                is_final=is_last_step,
+                # cosmos's `param_dtype` is one of "bfloat16" / "float16" /
+                # "float32"; all map to `torch.<name>` directly.
+                dtype=getattr(torch, str(self.config.train.param_dtype).lower()),
+            )
+
+        logger.info("[Policy] Saving cosmos checkpoint at step %d", current_step)
+        self.ckpt_manager.save_checkpoint(
+            model=self.model,
+            optimizer=self.optimizers,
+            scheduler=self.lr_schedulers,
+            step=current_step,
+            total_steps=total_steps,
+            remain_samples_num=remain_samples_num,
+            is_final=is_last_step,
+        )
+        self.ckpt_manager.save_check(step=current_step)
+
+    # ------------------------------------------------------------------
+    # Reference model lifecycle
+    # ------------------------------------------------------------------
+
+    def _ensure_reference_model(self) -> None:
+        """Create a frozen deep-copy of the policy on first use.
+
+        Stores the reference on a private attribute (not registered as a
+        submodule, since `Trainer` is an ABC, not an `nn.Module`). The
+        inherited `self.reference_state_dict` from `GRPOTrainer` is
+        unused — we drive KL via `teacher_model=` on the model forward
+        rather than the state-dict diff approach.
+        """
+        if self._kl_beta <= 0.0 or self._reference_model is not None:
+            return
+        self._reference_model = copy.deepcopy(self.model).eval()
+        for param in self._reference_model.parameters():
+            param.requires_grad_(False)
+
+    def _reference_reset(self, current_step: int) -> None:
+        """Periodically refresh the reference model from the live policy."""
+        if self._kl_beta <= 0.0 or self._reference_reset_interval <= 0:
+            return
+        if current_step % self._reference_reset_interval != 0:
+            return
+        self._reference_model = copy.deepcopy(self.model).eval()
+        for param in self._reference_model.parameters():
+            param.requires_grad_(False)

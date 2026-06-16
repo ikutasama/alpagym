@@ -1,0 +1,41 @@
+# @package policy
+kind: alpamayo
+
+model:
+  kind: alpamayo_r1
+  path: ???
+  device: cuda
+  dtype: bfloat16
+  use_cameras:
+    - camera_cross_left_120fov
+    - camera_front_wide_120fov
+    - camera_cross_right_120fov
+    - camera_front_tele_30fov
+  input_size: [320, 512]
+  num_context_frames: 4
+  num_historical_waypoints: 16
+  num_future_waypoints: 64
+  step_dt_us: 100000
+  bundle_config: {}
+
+inference:
+  max_batch_size: 4
+  sampling:
+    top_p: 0.98
+    top_k: null
+    temperature: 0.6
+    num_traj_samples: 1
+    num_traj_sets: 1
+    max_generation_length: null
+    # The AR1.5 VLM prefill intermittently emits an all-NaN trajectory; retry
+    # re-runs the prefill until finite, and determinism lowers the frequency.
+    force_determinism: true
+    retry_on_nonfinite: true
+    diffusion_kwargs:
+      int_method: sde
+      noise_level: 0.2
+      inference_step: 5
+      temperature: null
+  return_trace_for_rl: true
+
+trajectory_selector: identity

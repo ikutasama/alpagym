@@ -1,0 +1,27 @@
+personal_docs
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+
+# Build outputs
+build/
+dist/
+
+# Local editor and OS files
+.DS_Store
+.idea/
+.vscode/
+outputs/
+tmp/

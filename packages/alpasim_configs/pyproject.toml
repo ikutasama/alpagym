@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alpagym-alpasim-configs"
+version = "0.1.0"
+requires-python = ">=3.11,<3.13"
+dependencies = []
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"alpagym_alpasim_configs.configs" = ["**/*.yaml"]
+
+[project.entry-points."alpasim.configs"]
+alpagym = "alpagym_alpasim_configs.configs"

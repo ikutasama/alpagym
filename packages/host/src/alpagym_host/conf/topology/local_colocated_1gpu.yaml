@@ -1,0 +1,20 @@
+# @package _global_
+
+defaults:
+  - /execution/slurm/topology@execution.slurm.topology: all_in_one
+  - _self_
+
+execution:
+  backend: local_process
+  slurm:
+    exclusive: false
+    nodes: 1
+    topology:
+      alpasim_gpus: 1
+
+alpasim:
+  wizard_args:
+    topology: 1gpu
+
+cosmos:
+  mode: colocated

@@ -1,0 +1,12 @@
+# @package _global_
+# AlpaGym local-process deploy preset: runs the host CLI inline without Slurm.
+
+command: run
+
+# The topology preset selects backend=local_process for the local presets.
+# repo_url/repo_ref come from the shared defaults in default.yaml: the public
+# AlpaSim mirror at the alpasim-grpc rev, so the Wizard checkout and the runtime
+# proto stubs share one src/grpc schema.
+alpasim:
+  wizard_args:
+    deploy: local

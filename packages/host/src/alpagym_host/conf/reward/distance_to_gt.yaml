@@ -1,0 +1,5 @@
+# @package reward
+
+terms:
+  - kind: distance_to_gt
+    scale: -0.01

@@ -1,0 +1,56 @@
+# @package _global_
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+defaults:
+  - override /policy: alpamayo_r1
+  - override /topology: slurm_full_node_1_3_4
+  - override /reward: progress_safety
+
+expected_valid_steps: 22
+
+policy:
+  model:
+    path: ???
+  inference:
+    sampling:
+      diffusion_kwargs:
+        noise_level: 0.2
+
+dataset:
+  scene_ids:
+    - clipgt-a309e228-26e1-423e-a44c-cb00aa7378cb
+
+alpasim:
+  wizard_args:
+    deploy: local
+    control_timestep_us: 200_000
+    force_gt_duration_us: 1_600_000
+    n_sim_steps: 30
+    extra_overrides: "+cameras=4cam_1080 runtime.simulation_config.pose_reporting_interval_us=100000"
+
+cosmos:
+  launch:
+    rollout_replicas: 2
+  policy:
+    parallelism:
+      dp_shard_size: 2
+  train:
+    max_num_steps: 50
+    num_epochs: 10
+    train_batch_per_replica: 6
+    optm_lr: 1.0e-4
+    optm_warmup_steps: 1
+    train_policy:
+      mini_batch: 1
+      grpo_optimization_iterations: 1
+      kl_beta: 0.0
+  rollout:
+    n_generation: 6
+    prefetch_rollout: false
+  logging:
+    experiment_name: alpamayo_1_5_clrl_test_run
+
+execution:
+  slurm:
+    time: "06:00:00"

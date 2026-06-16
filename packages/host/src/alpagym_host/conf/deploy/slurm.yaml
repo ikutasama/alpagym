@@ -1,0 +1,33 @@
+# @package _global_
+# Slurm deploy preset template. Replace the placeholder paths and cluster
+# settings with values for your Slurm environment.
+
+command: submit
+
+run_root: /path/to/alpagym-runs
+
+cache_root_dir: /path/to/.cache/alpagym
+
+execution:
+  # backend=slurm comes from the paired slurm_* topology preset.
+  slurm:
+    partition: your-partition
+    account: your-account
+    qos: null
+    container_image: registry.example.com/your/alpagym:latest
+    container_cache_root: ${cache_root_dir}/sqsh
+    uv_cache_dir: ${cache_root_dir}/uv
+    container_mounts:
+      - ${execution.slurm.uv_cache_dir}:${execution.slurm.uv_cache_dir}
+      - /path/to/shared/filesystem:/path/to/shared/filesystem
+    export_env:
+      - UV_CACHE_DIR=${execution.slurm.uv_cache_dir}
+      - UV_PROJECT_ENVIRONMENT=/opt/venv
+      - VIRTUAL_ENV=/opt/venv
+      - WANDB_ENTITY=your-wandb-entity
+
+alpasim:
+  checkout_cache_dir: ${cache_root_dir}/alpasim/checkouts
+  wizard_args:
+    # Adapt this if your AlpaSim checkout provides a site-specific deploy preset.
+    deploy: local

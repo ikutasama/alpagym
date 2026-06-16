@@ -1,0 +1,24 @@
+# @package _global_
+
+defaults:
+  - /execution/slurm/topology@execution.slurm.topology: all_in_one
+  - _self_
+
+# One 8-GPU node split as 1 policy GPU, 3 rollout GPUs, and 4 AlpaSim GPUs.
+
+execution:
+  backend: slurm
+  slurm:
+    nodes: 1
+    topology:
+      alpasim_gpus: 4
+
+alpasim:
+  wizard_args:
+    topology: alpagym_4gpu
+
+cosmos:
+  mode: disaggregated
+  launch:
+    policy_replicas: 1
+    rollout_replicas: 3

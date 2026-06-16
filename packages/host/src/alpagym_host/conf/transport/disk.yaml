@@ -1,0 +1,5 @@
+# @package transport
+# Disk transport: rollout artifacts are JSON files written under
+# `artifact_paths.artifacts_dir`. This is the local development path;
+# distributed runs can use the NCCL transport.
+kind: disk

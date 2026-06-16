@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alpagym-plugins"
+version = "0.1.0"
+description = "Plugin registry and discovery for AlpaGym"
+requires-python = "==3.12.*"
+dependencies = []
+
+[project.scripts]
+alpagym-info = "alpagym_plugins.info:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["alpagym_plugins*"]

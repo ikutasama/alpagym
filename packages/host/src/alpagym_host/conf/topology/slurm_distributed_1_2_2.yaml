@@ -1,0 +1,33 @@
+# @package _global_
+
+defaults:
+  - /execution/slurm/topology@execution.slurm.topology: separate_nodes
+  # Cross-node disaggregated runs default to NCCL: rollout tensors flow over NCCL
+  # between nodes. `override` replaces the `transport: disk` default in default.yaml.
+  - override /transport: nccl
+  - _self_
+
+# Five 8-GPU nodes: one policy node, two rollout nodes, and two AlpaSim nodes.
+
+execution:
+  backend: slurm
+  slurm:
+    nodes: 5
+    topology:
+      cosmos_nodes: 3
+      alpasim_nodes: 2
+
+alpasim:
+  wizard_args:
+    topology: alpagym_8gpu
+
+cosmos:
+  mode: disaggregated
+  launch:
+    policy_replicas: 4
+    rollout_replicas: 16
+  train:
+    train_batch_per_replica: 2
+  policy:
+    parallelism:
+      dp_shard_size: 2

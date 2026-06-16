@@ -1,0 +1,9 @@
+# @package reward
+
+terms:
+  - kind: metric
+    metric_name: progress
+    scale: 1.0
+  - kind: metric
+    metric_name: collision_any
+    scale: -10.0

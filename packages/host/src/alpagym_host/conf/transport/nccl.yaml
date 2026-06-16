@@ -1,0 +1,27 @@
+# @package transport
+# NCCL transport: bulk rollout tensors flow over NCCL between rollout
+# workers (senders) and Cosmos trainer workers (receivers). A
+# runtime-owned `torch.distributed.TCPStore` carries the rendezvous metadata.
+# `run_lifecycle.execute_run` writes `nccl_env` to `os.environ` via
+# `apply_transport_env_vars` BEFORE the cosmos subprocess is spawned, so the
+# variables are visible to every NCCL initialization downstream -- both the
+# AlpaGym data plane and cosmos-rl's native policy->rollout weight-sync mesh.
+kind: nccl
+nccl_env:
+  NCCL_SHM_DISABLE: "0"
+  NCCL_DEBUG: WARN
+  NCCL_IB_DISABLE: "0"
+  # Pin the inter-node bootstrap interface away from loopback and the docker
+  # bridge. Without it, NCCL on AWS-IAD can pick docker0/lo cross-node and the
+  # comm-create collective times out under heavier rollout load. Mirrors the
+  # proven setting in the AlpaSim daemon's cosmos container script; EFA is
+  # auto-selected over libfabric on pool0. Treat the value as a first-run,
+  # per-cluster tuning item, not a fixed constant.
+  NCCL_SOCKET_IFNAME: "^lo,^docker"
+  # NCCL_TIMEOUT is read from resolved config by `cosmos/packer.py` to size
+  # Python-level timeouts (e.g. communicator_timeout_ms = NCCL_TIMEOUT * 1000).
+  # NCCL's C library has no such env var; it is exported with the rest of
+  # nccl_env so worker processes can inspect the budget via the environment.
+  NCCL_TIMEOUT: "1800"
+  TORCH_NCCL_ASYNC_ERROR_HANDLING: "1"
+nccl_read_device: cpu
