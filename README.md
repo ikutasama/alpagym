@@ -115,6 +115,7 @@ cluster.
 
 ## Documentation
 
+- [CoT–trajectory alignment analysis](docs/COT_TRAJECTORY_ALIGNMENT.md) - current RL limitations and a staged design for causally grounded joint reasoning/action training.
 - [Alpamayo 1.5 two-GPU server runbook](docs/SERVER_ALPAMAYO15_CLRL.md) - idempotent setup, preflight, smoke, and multi-step closed-loop RL commands.
 - [Onboarding Guide](docs/ONBOARDING.md) — host setup, auth, getting a model, and running locally.
 - [Contributing](CONTRIBUTING.md) — code style and review process.
