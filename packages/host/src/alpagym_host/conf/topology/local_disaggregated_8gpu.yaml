@@ -1,0 +1,26 @@
+# @package _global_
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+defaults:
+  - /execution/slurm/topology@execution.slurm.topology: all_in_one
+  - _self_
+
+# One local 8-GPU host: Cosmos uses GPUs 0-3 and AlpaSim uses GPUs 4-7.
+execution:
+  backend: local_process
+  slurm:
+    exclusive: false
+    nodes: 1
+    topology:
+      alpasim_gpus: 4
+
+alpasim:
+  wizard_args:
+    topology: alpagym_4gpu
+
+cosmos:
+  mode: disaggregated
+  launch:
+    policy_replicas: 1
+    rollout_replicas: 3

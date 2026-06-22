@@ -53,3 +53,28 @@ NCCL_P2P_DISABLE=1 MAX_NUM_STEPS=50 scripts/server_clrl.sh train
 
 若进程崩溃后 GPU 仍被占用，按官方 onboarding 的清理命令回收残留进程和
 Wizard 容器，再重新执行 smoke。
+
+## 4. 单机 8 x H200
+
+H200 preset 将 GPU 0 分配给训练策略，GPU 1–3 分配给三个 rollout replica，
+GPU 4–7 分配给四路 AlpaSim。先执行一个训练 step 的全链路验证：
+
+```bash
+scripts/server_clrl.sh smoke-h200
+```
+
+通过后运行默认 50 step 训练，或显式设置步数：
+
+```bash
+MAX_NUM_STEPS=50 scripts/server_clrl.sh train-h200
+```
+
+默认每组生成 6 条闭环轨迹，由三个 rollout GPU 各处理两条，trainer 每次消费
+完整的 6 条 GRPO group。不要设置 `CUDA_VISIBLE_DEVICES` 重排物理卡号，因为
+AlpaSim topology 明确占用物理 GPU 4–7。
+
+默认单 scene 只适合验证。正式训练可切换到已获权限的 NuRec suite：
+
+```bash
+TEST_SUITE_ID=public_2507 MAX_NUM_STEPS=50 scripts/server_clrl.sh train-h200
+```

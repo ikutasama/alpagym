@@ -17,15 +17,16 @@ need() { command -v "$1" >/dev/null 2>&1 || die "missing command: $1"; }
 
 usage() {
   cat <<'EOF'
-Usage: scripts/server_clrl.sh prepare|preflight|p2p|smoke|train
+Usage: scripts/server_clrl.sh prepare|preflight|p2p|smoke|train|smoke-h200|train-h200
 
 Environment overrides:
   MODEL_PATH       Converted AlpaGym checkpoint directory
   RELEASE_PATH     Download directory for the released HF checkpoint
   MAX_NUM_STEPS    Override training steps (train mode only)
   SCENE_ID         Override the default NuRec scene
+  TEST_SUITE_ID    Use a NuRec test suite instead of a single scene
   ENABLE_WANDB=1   Enable console + W&B logging
-  SKIP_P2P_CHECK=1 Skip the two-GPU NCCL probe during preflight
+  SKIP_P2P_CHECK=1 Skip the NCCL policy-to-rollout probe during preflight
   NCCL_P2P_DISABLE=1  Use shared-memory NCCL if direct P2P is broken
   ALLOW_LOW_VRAM=1 Continue when either GPU has less than MIN_VRAM_MIB
 EOF
@@ -43,12 +44,14 @@ check_model() {
 }
 
 check_gpus() {
+  local required_gpus="${1:-2}"
   need nvidia-smi
   mapfile -t gpu_memory < <(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits)
-  (( ${#gpu_memory[@]} >= 2 )) || die "Alpamayo 1.5 local training requires at least 2 visible GPUs"
+  (( ${#gpu_memory[@]} >= required_gpus )) \
+    || die "this profile requires at least $required_gpus visible GPUs; found ${#gpu_memory[@]}"
 
   local i
-  for i in 0 1; do
+  for ((i = 0; i < required_gpus; i++)); do
     if (( gpu_memory[i] < min_vram_mib )); then
       [[ "${ALLOW_LOW_VRAM:-0}" == "1" ]] \
         || die "GPU $i has ${gpu_memory[i]} MiB; recommended minimum is ${min_vram_mib} MiB (set ALLOW_LOW_VRAM=1 to try anyway)"
@@ -58,22 +61,28 @@ check_gpus() {
 }
 
 run_p2p() {
+  local processes="${1:-2}"
   note "Checking NCCL point-to-point transport"
-  timeout 45s uv run --no-sync torchrun --nproc-per-node=2 install/check_nccl_p2p.py \
-    || die "NCCL P2P failed or hung. Retry with: NCCL_P2P_DISABLE=1 scripts/server_clrl.sh p2p"
+  timeout 45s uv run --no-sync torchrun --nproc-per-node="$processes" install/check_nccl_p2p.py \
+    || die "NCCL P2P failed or hung. Retry with: NCCL_P2P_DISABLE=1 P2P_PROCS=$processes scripts/server_clrl.sh p2p"
 }
 
 preflight() {
+  local required_gpus="${1:-2}"
+  local p2p_processes="${2:-2}"
   [[ "$(uname -s)" == "Linux" ]] || die "the CUDA workspace is Linux x86_64 only"
+  if (( required_gpus == 8 )) && [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    die "unset CUDA_VISIBLE_DEVICES for the 8-GPU profile; AlpaSim uses physical GPUs 4-7"
+  fi
   need uv
   need docker
   need redis-server
   need git-lfs
-  check_gpus
+  check_gpus "$required_gpus"
   install/check_env.sh
   check_model
   if [[ "${SKIP_P2P_CHECK:-0}" != "1" ]]; then
-    run_p2p
+    run_p2p "$p2p_processes"
   fi
   note "Preflight passed"
 }
@@ -108,15 +117,26 @@ prepare() {
 
 launch() {
   local experiment="$1"
-  preflight
+  local required_gpus="${2:-2}"
+  local p2p_processes="${3:-2}"
+  local smoke_steps="${4:-}"
+  preflight "$required_gpus" "$p2p_processes"
 
   local -a overrides=(
     "experiment=$experiment"
     "policy.model.path=$model_path"
     "reward=progress_safety"
   )
-  [[ -z "${SCENE_ID:-}" ]] || overrides+=("dataset.scene_ids=[$SCENE_ID]")
-  if [[ "$experiment" == "alpamayo_1_5_local_2gpu_train" && -n "${MAX_NUM_STEPS:-}" ]]; then
+  if [[ -n "${SCENE_ID:-}" && -n "${TEST_SUITE_ID:-}" ]]; then
+    die "set either SCENE_ID or TEST_SUITE_ID, not both"
+  elif [[ -n "${TEST_SUITE_ID:-}" ]]; then
+    overrides+=("dataset.test_suite_id=$TEST_SUITE_ID" "dataset.scene_ids=null")
+  elif [[ -n "${SCENE_ID:-}" ]]; then
+    overrides+=("dataset.scene_ids=[$SCENE_ID]" "dataset.test_suite_id=null")
+  fi
+  if [[ -n "$smoke_steps" ]]; then
+    overrides+=("cosmos.train.max_num_steps=$smoke_steps")
+  elif [[ -n "${MAX_NUM_STEPS:-}" ]]; then
     [[ "$MAX_NUM_STEPS" =~ ^[1-9][0-9]*$ ]] || die "MAX_NUM_STEPS must be a positive integer"
     overrides+=("cosmos.train.max_num_steps=$MAX_NUM_STEPS")
   fi
@@ -132,9 +152,11 @@ launch() {
 case "$mode" in
   prepare) prepare ;;
   preflight) preflight ;;
-  p2p) need uv; check_gpus; run_p2p ;;
+  p2p) need uv; check_gpus "${P2P_PROCS:-2}"; run_p2p "${P2P_PROCS:-2}" ;;
   smoke) launch alpamayo_1_5_local_2gpu_smoke ;;
   train) launch alpamayo_1_5_local_2gpu_train ;;
+  smoke-h200) launch alpamayo_1_5_local_8gpu_h200 8 4 1 ;;
+  train-h200) launch alpamayo_1_5_local_8gpu_h200 8 4 ;;
   -h|--help|help) usage ;;
   *) usage >&2; exit 2 ;;
 esac

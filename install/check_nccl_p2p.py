@@ -8,7 +8,7 @@ which shows up as a hang during the first weight sync with both GPUs pinned at
 tell, before launching a full run, whether your topology works as-is or whether
 you need ``NCCL_P2P_DISABLE=1``.
 
-Run it on two GPUs:
+Run it on the policy GPU plus every rollout GPU (two GPUs is the minimum):
 
     uv run --no-sync torchrun --nproc-per-node=2 install/check_nccl_p2p.py
 
@@ -35,7 +35,7 @@ import torch.distributed as dist
 
 
 def main() -> None:
-    """Send a tensor from rank 0 to rank 1 over NCCL and verify it arrives."""
+    """Send from policy rank 0 to every rollout rank and verify each path."""
     local_rank = int(os.environ["LOCAL_RANK"])
     if torch.cuda.device_count() < 2:
         if local_rank == 0:
@@ -53,29 +53,35 @@ def main() -> None:
     # few GB moved below complete well under it even over shared memory.
     dist.init_process_group(backend="nccl", timeout=datetime.timedelta(seconds=10))
     rank = dist.get_rank()
-    if dist.get_world_size() != 2:
+    world_size = dist.get_world_size()
+    if world_size < 2:
         if rank == 0:
-            print("This check expects exactly 2 ranks (--nproc-per-node=2).")
+            print("This check expects at least 2 ranks (--nproc-per-node=2 or more).")
         dist.destroy_process_group()
         return
 
-    # ~256 MB across several iterations so we exercise the real data path, not
-    # just connection setup.
+    # ~256 MB per policy-to-rollout path across several iterations so we
+    # exercise the real data path, not just connection setup.
     tensor = torch.empty(64 * 1024 * 1024, dtype=torch.float32, device=local_rank)
-    for step in range(20):
-        if rank == 0:
-            tensor.fill_(float(step))
-            dist.send(tensor, dst=1)
-        else:
-            dist.recv(tensor, src=0)
-            assert torch.allclose(tensor, torch.full_like(tensor, float(step)))
-        torch.cuda.synchronize()
+    for peer in range(1, world_size):
+        for step in range(20):
+            expected = float(peer * 100 + step)
+            if rank == 0:
+                tensor.fill_(expected)
+                dist.send(tensor, dst=peer)
+            elif rank == peer:
+                dist.recv(tensor, src=0)
+                assert torch.allclose(tensor, torch.full_like(tensor, expected))
+            torch.cuda.synchronize()
 
     dist.barrier()
-    if rank == 1:
+    if rank == 0:
         p2p_disabled = os.environ.get("NCCL_P2P_DISABLE") == "1"
         suffix = " (with NCCL_P2P_DISABLE=1)" if p2p_disabled else ""
-        print(f"NCCL P2P send/recv OK{suffix}: this topology works for AlpaGym.")
+        print(
+            f"NCCL P2P send/recv OK across {world_size} GPUs{suffix}: "
+            "this topology works for AlpaGym."
+        )
     dist.destroy_process_group()
 
 
