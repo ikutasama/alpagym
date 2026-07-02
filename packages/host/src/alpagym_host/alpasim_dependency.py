@@ -48,8 +48,7 @@ def resolve_alpasim_checkout(config: AlpaSimConfig) -> Path:
     build_dir = Path(tempfile.mkdtemp(dir=checkout_cache_dir, prefix=".build-"))
     try:
         logging.info("Building AlpaSim checkout %s@%s in %s", config.repo_url, commit, build_dir)
-        subprocess.run(["git", "clone", config.repo_url, str(build_dir)], check=True, text=True)
-        subprocess.run(["git", "checkout", commit], cwd=build_dir, check=True, text=True)
+        _fetch_commit(config.repo_url, commit, build_dir)
         _validate_alpasim_layout(build_dir)
         subprocess.run(
             ["uv", "run", "compile-protos"],
@@ -95,6 +94,26 @@ def _resolve_commit_sha(repo_url: str, repo_ref: str) -> str:
     if not refs:
         raise ValueError(f"git ls-remote found no ref {repo_ref!r} in {repo_url}")
     return refs[0]
+
+
+def _fetch_commit(repo_url: str, commit: str, dest: Path) -> None:
+    """Fetch a single ``commit`` from ``repo_url`` into ``dest`` and check it out.
+
+    Fetching by SHA retrieves any commit the server exposes, including a
+    pull-request head (``refs/pull/*``) that ``git clone`` never downloads and so
+    cannot check out. GitHub enables fetch-by-SHA, matching how ``uv`` resolves
+    the same git pin.
+    """
+    subprocess.run(["git", "init", "-q", str(dest)], check=True, text=True)
+    # A named remote (not a bare fetch URL) is required so the git-LFS smudge
+    # filter has an endpoint to download AlpaSim's LFS blobs from at checkout.
+    subprocess.run(["git", "remote", "add", "origin", repo_url], cwd=dest, check=True, text=True)
+    subprocess.run(
+        ["git", "fetch", "--depth", "1", "origin", commit], cwd=dest, check=True, text=True
+    )
+    subprocess.run(
+        ["git", "checkout", "-q", "--detach", "FETCH_HEAD"], cwd=dest, check=True, text=True
+    )
 
 
 def validate_alpasim_checkout_cache(config: AlpaSimConfig) -> None:

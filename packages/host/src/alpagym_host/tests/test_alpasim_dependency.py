@@ -33,19 +33,24 @@ def test_cached_checkout_builds_in_temp_then_publishes(tmp_path, monkeypatch) ->
     assert dest.parent == tmp_path / "cache" / "alpagym" / "alpasim"
     assert dest.name == _content_key(REPO_URL, commit)
 
-    clone = next(c for c in commands if c[:2] == ["git", "clone"])
-    build_dir = Path(clone[3])
+    init = next(c for c in commands if c[:2] == ["git", "init"])
+    build_dir = Path(init[3])
     assert build_dir != dest  # built aside, not directly in the published path
     assert build_dir.parent == dest.parent
 
-    assert ["git", "clone", REPO_URL, str(build_dir)] in commands
-    assert ["git", "checkout", commit] in commands
+    # Fetch the pinned commit by SHA (a clone cannot reach a PR-head ref) and
+    # check it out, so provisioning works for any commit the remote exposes.
+    assert ["git", "init", "-q", str(build_dir)] in commands
+    assert ["git", "remote", "add", "origin", REPO_URL] in commands
+    assert ["git", "fetch", "--depth", "1", "origin", commit] in commands
+    assert ["git", "checkout", "-q", "--detach", "FETCH_HEAD"] in commands
     assert ["uv", "run", "compile-protos"] in commands
     assert ["uv", "venv", "--relocatable", str(build_dir / ".venv")] in commands
     assert ["uv", "sync", "--all-extras", "--no-editable"] in commands
 
-    # The removed in-place mutations and the dropped editable configs install.
-    assert not any(c[:2] == ["git", "fetch"] for c in commands)
+    # A plain `git clone` never runs, and neither do the removed in-place
+    # mutations or the dropped editable configs install.
+    assert not any(c[:2] == ["git", "clone"] for c in commands)
     assert not any(c[:2] == ["git", "status"] for c in commands)
     assert not any(c[:3] == ["uv", "pip", "install"] for c in commands)
 
@@ -62,7 +67,7 @@ def test_cached_checkout_resolves_branch_ref_to_commit(tmp_path, monkeypatch) ->
     dest = resolve_alpasim_checkout(_alpasim_config(repo_ref="main"))
 
     assert ["git", "ls-remote", REPO_URL, "main"] in commands
-    assert ["git", "checkout", resolved] in commands
+    assert ["git", "fetch", "--depth", "1", "origin", resolved] in commands
     assert dest.name == _content_key(REPO_URL, resolved)
 
 
@@ -101,7 +106,7 @@ def test_cached_checkout_reuses_winner_on_publish_race(tmp_path, monkeypatch) ->
 
     assert dest.name == _content_key(REPO_URL, commit)
     assert (dest / "winner").read_text(encoding="utf-8") == "winner"
-    build_dir = Path(next(c for c in commands if c[:2] == ["git", "clone"])[3])
+    build_dir = Path(next(c for c in commands if c[:2] == ["git", "init"])[3])
     assert not build_dir.exists()  # our losing build was cleaned up
 
 
@@ -125,7 +130,7 @@ def test_concurrent_checkout_publishes_once_without_corruption(tmp_path, monkeyp
 
     def run(command, cwd=None, env=None, check=True, text=True, capture_output=False):
         del cwd, env, check, text, capture_output
-        if command[:2] == ["git", "clone"]:
+        if command[:2] == ["git", "init"]:
             _write_alpasim_layout(Path(command[3]))
         if command[:3] == ["uv", "venv", "--relocatable"]:
             _write_relocatable_venv(Path(command[3]))
@@ -186,7 +191,7 @@ def test_cached_checkout_pins_uv_envs(tmp_path, monkeypatch) -> None:
     def run(command, cwd=None, env=None, check=True, text=True, capture_output=False):
         del check, text, capture_output
         calls.append((command, cwd, env))
-        if command[:2] == ["git", "clone"]:
+        if command[:2] == ["git", "init"]:
             _write_alpasim_layout(Path(command[3]))
         if command[:3] == ["uv", "venv", "--relocatable"]:
             _write_relocatable_venv(Path(command[3]))
@@ -199,7 +204,7 @@ def test_cached_checkout_pins_uv_envs(tmp_path, monkeypatch) -> None:
 
     resolve_alpasim_checkout(_alpasim_config(repo_ref="b" * 40))
 
-    build_dir = Path(next(c for c, _, _ in calls if c[:2] == ["git", "clone"])[3])
+    build_dir = Path(next(c for c, _, _ in calls if c[:2] == ["git", "init"])[3])
     uv_calls = [(c, env) for c, _, env in calls if c[0] == "uv"]
     assert uv_calls  # there is at least one uv build step
     for command, env in uv_calls:
@@ -224,7 +229,7 @@ def test_cached_checkout_restores_plugin_configs_dropped_by_no_editable(
 
     def run(command, cwd=None, env=None, check=True, text=True, capture_output=False):
         del env, check, text, capture_output
-        if command[:2] == ["git", "clone"]:
+        if command[:2] == ["git", "init"]:
             build = Path(command[3])
             _write_alpasim_layout(build)
             # A plugin ships Hydra config groups in its source tree.
@@ -307,14 +312,14 @@ def test_validate_alpasim_checkout_cache_creates_configured_dir(tmp_path: Path) 
 def _recording_run(commands: list, *, ls_remote_sha: str = "a" * 40):
     """Return a `subprocess.run` replacement recording commands and faking git/uv.
 
-    `git clone` writes the AlpaSim layout into the clone target so the build steps
-    that follow find it; `git ls-remote` returns `ls_remote_sha`.
+    `git init` writes the AlpaSim layout into the checkout dir so the fetch and
+    build steps that follow find it; `git ls-remote` returns `ls_remote_sha`.
     """
 
     def run(command, cwd=None, env=None, check=True, text=True, capture_output=False):
         del cwd, env, check, text, capture_output
         commands.append(command)
-        if command[:2] == ["git", "clone"]:
+        if command[:2] == ["git", "init"]:
             _write_alpasim_layout(Path(command[3]))
         if command[:3] == ["uv", "venv", "--relocatable"]:
             _write_relocatable_venv(Path(command[3]))
