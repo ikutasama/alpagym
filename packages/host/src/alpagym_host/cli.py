@@ -53,8 +53,10 @@ def main(cfg: DictConfig) -> object:
     run_config = load_or_create_run_config(cfg)
     # Validate HuggingFace access before dispatching either command, so submit
     # fails before queuing a Slurm allocation and run fails before resolving the
-    # AlpaSim checkout. The check is scene-agnostic, so it needs no checkout.
-    validate_huggingface_access()
+    # AlpaSim checkout. Skip the check when Wizard is explicitly configured to
+    # use a local NuRec directory instead of downloading scenes from HuggingFace.
+    if "scenes.local_usdz_dir=" not in run_config.alpasim.wizard_args.extra_overrides:
+        validate_huggingface_access()
     if cfg.command == "run":
         execute_run(run_config)
         return run_config
