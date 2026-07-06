@@ -88,22 +88,17 @@ def load_inference_model(
     with open(codebook_path, "rb") as f:
         codebook_data = pickle.load(f)
 
-    action_start_id = model_config.get("action_start_id", 151665)
-
-    # Load trajectory config
-    traj_config = model_config.get("trajectory", {})
-    num_poses = traj_config.get("num_poses", 10)
-    interval_length = traj_config.get("interval_length", 0.5)
+    bc = model_config.bundle_config
 
     return AutoVLAInferenceModel(
         vlm=vlm,
         processor=processor,
         codebook=codebook_data,
-        action_start_id=action_start_id,
-        num_poses=num_poses,
-        interval_length=interval_length,
+        action_start_id=bc.get("action_start_id", 151665),
+        num_poses=bc.get("trajectory", {}).get("num_poses", 10),
+        interval_length=bc.get("trajectory", {}).get("interval_length", 0.5),
         device=device,
-        use_cot=model_config.get("use_cot", False),
+        use_cot=bc.get("use_cot", False),
     )
 
 
@@ -115,7 +110,7 @@ def build_model_inputs(
 
     return functools.partial(
         AutoVLAInferenceModel.build_trainer_model_inputs,
-        action_start_id=run_config.policy.model.get("action_start_id", 151665),
+        action_start_id=run_config.policy.model.bundle_config.get("action_start_id", 151665),
     )
 
 

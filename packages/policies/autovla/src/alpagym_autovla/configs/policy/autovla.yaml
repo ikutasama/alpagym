@@ -15,12 +15,12 @@ model:
   num_historical_waypoints: 16
   num_future_waypoints: 10
   step_dt_us: 100000
-  action_start_id: 151665
-  use_cot: false
-  trajectory:
-    num_poses: 10
-    interval_length: 0.5
-  bundle_config: {}
+  bundle_config:
+    action_start_id: 151665
+    use_cot: false
+    trajectory:
+      num_poses: 10
+      interval_length: 0.5
 
 inference:
   max_batch_size: 1
