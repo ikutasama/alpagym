@@ -69,7 +69,7 @@ def _replay_data(
         replay_schema_version=1,
         payload_schema="test.replay.v1",
         payload_schema_version=1,
-        model_family="alpamayo_r1",
+        model_family="generic",
         action_selection=ActionSelection(set_ix=0, sample_ix=1),
         old_logprob=old_logprob,
         payload=payload,
@@ -294,7 +294,7 @@ def test_unpack_rejects_dataclass_type_outside_allowed_prefix() -> None:
                     "replay_schema_version": 1,
                     "payload_schema": "test.replay.v1",
                     "payload_schema_version": 1,
-                    "model_family": "alpamayo_r1",
+                    "model_family": "generic",
                     "action_selection": {
                         "set_ix": 0,
                         "sample_ix": 1,

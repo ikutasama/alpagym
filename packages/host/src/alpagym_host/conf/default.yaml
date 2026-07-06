@@ -3,6 +3,9 @@ defaults:
   - _self_
   - policy: alpamayo
   - reward: distance_to_gt
+  # transport precedes topology so a topology preset can `override /transport`
+  # (the distributed presets default to nccl); Hydra requires the overridden group
+  # to appear earlier in the defaults list than the config that overrides it.
   - transport: disk
   - topology: ???
   - optional run: null
@@ -42,6 +45,9 @@ execution:
     # (the deploy preset mounts the filesystem that holds it). Cosmos runs
     # `uv sync --project` and launches from here.
     container_workdir: ${current_alpagym_project_root:}
+    # Requeue ~2 min before the time limit and resume from checkpoint. Needs
+    # cosmos.train.ckpt.enable_checkpoint.
+    autoresume: false
 
 # Per-episode step budget the trainer's packer pads every rollout to.
 expected_valid_steps: 8
@@ -54,6 +60,20 @@ dataset:
     - clipgt-37113280-a033-4be4-afdd-cb199299e028
     # - clipgt-35b7b92a-b64d-4b54-afbb-d23f0b4df598
     # - clipgt-2f474f6d-509a-483e-ad4d-43fee7b4fb06
+    # - clipgt-3689391b-2b63-450b-9878-3804c70583ea
+    # - clipgt-05f35348-9de0-4f68-ac65-f31316dbb59e
+    # - clipgt-3080d0eb-830c-4035-a7a4-393ae04556c1
+    # - clipgt-0ce02937-f31b-4b4e-8286-3af73ae8861e
+    # - clipgt-1920170b-0317-4211-9b7c-1002c9925d7a
+    # - clipgt-07981e6a-22dd-4796-ad2f-1252037ecd28
+    # - clipgt-1bfd39ec-e09c-41fd-94e7-5fa70aac3a47
+    # - clipgt-1d205d02-7180-40c0-8242-22e57ad977d7
+    # - clipgt-12855a41-ba51-42a7-b5d6-8d75ae7cfb5c
+    # - clipgt-2b4b2e84-cff4-4697-a4b5-ccb706f69438
+    # - clipgt-218cce90-9835-4c8c-973c-558c316ee68f
+    # - clipgt-3b9258a2-6c29-4467-9c82-d043d61160dc
+    # - clipgt-24e426ed-e651-4278-b4ea-7a4b90d80edd
+    # - clipgt-348210ac-6ad8-425c-8797-f2babe6c8850
 
 alpasim:
   # Set repo_path to use an existing checkout directly. When set, AlpaGym skips
@@ -61,9 +81,11 @@ alpasim:
   repo_path: null
   # Optional directory for cached AlpaSim checkouts. Defaults to XDG_CACHE_HOME.
   checkout_cache_dir: null
-  # AlpaSim mirror cloned for the Wizard checkout. Shared default for all
-  # deploys; set repo_path to start Wizard from a local checkout instead.
-  repo_url: https://github.com/NVlabs/alpasim.git
+  # repo_url and repo_ref are both derived from the single active `alpasim-grpc`
+  # pin in the workspace pyproject.toml, so the Wizard runtime checkout and the
+  # compiled `src/grpc/**` proto stubs are the same repo@rev. Set repo_path to
+  # start Wizard from a local checkout instead of cloning.
+  repo_url: ${alpasim_repo_url:}
   repo_ref: ${alpasim_grpc_repo_ref:}
   startup_timeout_s: 1200.0
   simulation_timeout_s: 600.0

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+import signal
 from pathlib import Path
 from subprocess import CompletedProcess
 
@@ -122,10 +123,9 @@ def test_execute_run_runs_local_process_lifecycle(
         [
             "uv",
             "run",
+            "--all-packages",
             "--project",
             str(run_lifecycle.alpagym_project_root()),
-            "--package",
-            "alpagym-runtime",
             "python",
             "-m",
             "cosmos_rl.launcher.launch_all",
@@ -282,6 +282,98 @@ def test_execute_run_runs_distributed_slurm_topology(
     assert "--nodelist=cosmos-0,cosmos-1" in cosmos_command
     assert "alpasim-0" not in " ".join(cosmos_command)
     assert all("CUDA_VISIBLE_DEVICES" not in " ".join(command) for command in commands)
+
+
+def test_execute_run_requeues_on_autoresume_timeout(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The pre-timeout SIGUSR1 tears down wizards and requeues the Slurm job."""
+    from alpagym_host import run_lifecycle
+
+    uv_cache_dir = tmp_path / "uv-cache"
+    model_path = _write_model_bundle_dir(tmp_path)
+    register_config_schema()
+    with initialize_config_module(version_base=None, config_module="alpagym_host.conf"):
+        cfg = compose(
+            config_name="default",
+            overrides=[
+                f"run_root={tmp_path.as_posix()}",
+                "deploy=local",
+                "topology=slurm_distributed_1_1_1",
+                "policy.model.kind=alpamayo_r1",
+                f"policy.model.path={model_path.as_posix()}",
+                "execution.slurm.partition=batch",
+                "execution.slurm.account=research",
+                "execution.slurm.cpus_per_task=16",
+                "execution.slurm.container_image=/containers/alpagym.sqsh",
+                f"execution.slurm.uv_cache_dir={uv_cache_dir.as_posix()}",
+                "execution.slurm.autoresume=true",
+                f"alpasim.repo_path={tmp_path / 'alpasim'}",
+                "alpasim.repo_url=null",
+                "alpasim.repo_ref=null",
+            ],
+        )
+    artifact_paths = build_artifact_paths(cfg)
+    artifact_paths.log_dir.mkdir(parents=True)
+    artifact_paths.alpasim_log_dir.mkdir(parents=True)
+    config: RunConfig = build_run_config(cfg, artifact_paths)
+
+    monkeypatch.setenv("SLURM_JOB_ID", "424242")
+    monkeypatch.setattr(
+        run_lifecycle, "allocated_hostnames", lambda: ["cosmos-0", "cosmos-1", "alpasim-0"]
+    )
+    monkeypatch.setattr(
+        run_lifecycle, "resolve_alpasim_checkout", lambda config: tmp_path / "alpasim"
+    )
+    monkeypatch.setattr(
+        run_lifecycle,
+        "prepare_container_image",
+        lambda container_image, container_cache_root: "/containers/alpagym.sqsh",
+    )
+    monkeypatch.setattr(
+        run_lifecycle, "wait_for_runtime_ready", lambda **kwargs: (kwargs["published_host"], 30051)
+    )
+    monkeypatch.setattr(
+        run_lifecycle,
+        "fetch_runtime_info",
+        lambda host, port, timeout_s: (9, ["scene_a"]),
+        raising=False,
+    )
+
+    # One ordered event log proves wizard cleanup completes before the requeue.
+    events: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        run_lifecycle,
+        "ensure_process_terminated",
+        lambda process: events.append(("terminate", process)),
+    )
+
+    class FakeWizard:
+        """Behave like a live Wizard srun process."""
+
+        def poll(self):
+            """Report the process as still running."""
+            return None
+
+    monkeypatch.setattr(run_lifecycle.subprocess, "Popen", lambda command, **kwargs: FakeWizard())
+
+    def fake_run(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+        if command[:2] == ["scontrol", "requeue"]:
+            events.append(("requeue", command))
+            return CompletedProcess(args=command, returncode=0)
+        # Drive the actual signal path: invoke the SIGUSR1 handler execute_run
+        # registered, as Slurm would just before the time limit. Raises (and fails
+        # loudly via TypeError) if no handler was installed.
+        signal.getsignal(signal.SIGUSR1)(signal.SIGUSR1, None)
+        raise AssertionError("SIGUSR1 handler did not interrupt the Cosmos launch")
+
+    monkeypatch.setattr(run_lifecycle.subprocess, "run", fake_run)
+
+    execute_run(config)
+
+    assert [kind for kind, _ in events] == ["terminate", "requeue"]
+    assert events[-1][1] == ["scontrol", "requeue", "424242"]
 
 
 def test_execute_run_resolves_relative_slurm_wizard_paths(

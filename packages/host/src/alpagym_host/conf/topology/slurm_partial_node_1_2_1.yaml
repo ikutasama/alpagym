@@ -2,6 +2,7 @@
 
 defaults:
   - /execution/slurm/topology@execution.slurm.topology: all_in_one
+  - override /transport: nccl
   - _self_
 
 # One partial Slurm node split as 1 policy GPU, 2 rollout GPUs, and 1 AlpaSim GPU.

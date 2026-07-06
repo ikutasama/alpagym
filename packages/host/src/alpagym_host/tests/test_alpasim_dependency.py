@@ -253,7 +253,9 @@ def test_cached_checkout_restores_plugin_configs_dropped_by_no_editable(
 
     dest = resolve_alpasim_checkout(_alpasim_config(repo_ref="b" * 40))
 
-    restored = dest / ".venv/lib/python3.12/site-packages/alpasim_example/configs/deploy/cluster.yaml"
+    restored = (
+        dest / ".venv/lib/python3.12/site-packages/alpasim_example/configs/deploy/cluster.yaml"
+    )
     assert (
         restored.is_file()
     )  # the Wizard can now resolve pkg://alpasim_example.configs deploy=cluster

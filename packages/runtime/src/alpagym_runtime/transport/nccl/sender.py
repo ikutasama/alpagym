@@ -179,9 +179,14 @@ class NcclSender:
         Only ``_claimed_sends`` is running an NCCL op: a claimed transfer is
         being shipped by the background loop right now. Held ``_pending_sends``
         are inert tensors awaiting a receiver request, so they are left in place
-        and ship after the R2R weight broadcast. Returns whether nothing was in
-        flight when it returned; the NCCL writer's ``flush_pending_sends`` treats
-        a ``False`` return as fail-fast and raises before weight sync.
+        and ship after the R2R weight broadcast. A held send cannot be claimed
+        mid-broadcast: the policy publishes receive requests only synchronously
+        inside ``get_policy_input``, never during the weight-sync phase that R2R
+        belongs to, so the poll loop has no request to claim while R2R runs (see
+        the transport README's "Coexistence with weight sync"). Returns whether
+        nothing was in flight when it returned; the NCCL writer's
+        ``flush_pending_sends`` treats a ``False`` return as fail-fast and raises
+        before weight sync.
         """
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:

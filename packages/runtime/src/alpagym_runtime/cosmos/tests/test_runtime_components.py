@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import functools
 import importlib
 import io
 import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import torch
@@ -152,6 +153,7 @@ def _write_resolved_config(
                 },
             },
             "rollout": {
+                "backend": "alpagym_rollout",
                 "n_generation": 2,
                 "batch_size": 1,
                 "parallelism": {
@@ -565,6 +567,86 @@ def _alpamayo_test_policy_input() -> Any:
     )
 
 
+class _FakeR1Model(torch.nn.Module):
+    """Fake public R1 trajectory model exposing `sample_trajectories_from_data`."""
+
+    def __init__(
+        self,
+        num_traj_sets: int,
+        num_traj_samples: int,
+        horizon: int,
+    ) -> None:
+        """Bind the fake to the per-call output shape it should emit."""
+        super().__init__()
+        self._num_traj_sets = num_traj_sets
+        self._num_traj_samples = num_traj_samples
+        self._horizon = horizon
+        self.call_count = 0
+        self.sample_call_kwargs: list[dict[str, Any]] = []
+        self.config = SimpleNamespace(
+            model_type="alpamayo_reasoning_vla_expert",
+            legacy_inference_image_input_format=True,
+        )
+
+    def sample_trajectories_from_data(
+        self,
+        data: dict[str, Any],
+        top_p: float = 0.98,
+        top_k: int | None = None,
+        temperature: float = 0.6,
+        num_traj_samples: int = 6,
+        num_traj_sets: int = 1,
+        return_extra: bool = False,
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]:
+        """Return preset tensors with a leading batch axis matching `data`."""
+        self.sample_call_kwargs.append(
+            {
+                "return_extra": return_extra,
+                "diffusion_kwargs": kwargs.get("diffusion_kwargs"),
+            }
+        )
+        del top_p, top_k, temperature, return_extra, kwargs
+        del num_traj_samples, num_traj_sets
+        self.call_count += 1
+        batch_size = int(data["camera_indices"].shape[0])
+        pred_xyz = torch.zeros(
+            (batch_size, self._num_traj_sets, self._num_traj_samples, self._horizon, 3),
+            dtype=torch.float32,
+        )
+        pred_rot = (
+            torch.eye(3)
+            .expand(
+                batch_size,
+                self._num_traj_sets,
+                self._num_traj_samples,
+                self._horizon,
+                3,
+                3,
+            )
+            .clone()
+        )
+        logprob = torch.zeros(
+            (batch_size, self._num_traj_sets, self._num_traj_samples), dtype=torch.float32
+        )
+        num_candidates = self._num_traj_sets * self._num_traj_samples
+        samples_list = torch.zeros(
+            (batch_size * num_candidates, self._horizon + 1, self._horizon, 3),
+            dtype=torch.float32,
+        )
+        timesteps = torch.linspace(0.0, 1.0, self._horizon + 1, dtype=torch.float32)
+        return (
+            pred_xyz,
+            pred_rot,
+            logprob,
+            {
+                "samples_list": samples_list,
+                "timesteps": timesteps,
+                "noise_level": 0.2,
+            },
+        )
+
+
 def test_alpamayo_rollout_model_param_map_deduplicates_tied_parameters() -> None:
     """R2R sync should use the same unique parameter surface as P2R sync."""
     rollout_module = importlib.import_module("alpagym_runtime.cosmos.rollout_backend")
@@ -588,3 +670,325 @@ def test_alpamayo_rollout_model_param_map_deduplicates_tied_parameters() -> None
 
     assert set(model.state_dict()) == {"embed_tokens.weight", "lm_head.weight"}
     assert list(rollout.model_param_map(FakeWeightMapper())) == ["embed_tokens.weight"]
+
+
+def test_alpamayo_rollout_with_monkeypatched_alpamayo_r1_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cosmos_stubs: None,
+) -> None:
+    """Drive one Alpamayo rollout through a monkeypatched Alpamayo R1 model."""
+    del cosmos_stubs
+
+    rollout_module = importlib.import_module("alpagym_runtime.cosmos.rollout_backend")
+    importlib.import_module("alpagym_runtime.cosmos.trainer")
+    packer_module = importlib.import_module("alpagym_runtime.cosmos.packer")
+
+    import alpagym_alpamayo_r1.inference_model as r1_inference_model
+    import alpamayo1_x_rl.models.expert_model.model
+    from alpagym_alpamayo_r1.inference_model import AlpamayoR1InferenceModel
+    from alpagym_runtime.replay import DataPackerConfig
+    from cosmos_rl.rollout.rollout_base import RolloutRegistry
+
+    bundle_dir = tmp_path / "alpamayo_r1_bundle"
+    bundle_dir.mkdir()
+    (bundle_dir / "config.json").write_text(
+        json.dumps({"model_type": "alpamayo_reasoning_vla_expert"}), encoding="utf-8"
+    )
+
+    horizon = 4
+    num_traj_sets = 1
+    num_traj_samples = 2
+
+    fake_r1_model = _FakeR1Model(
+        num_traj_sets=num_traj_sets,
+        num_traj_samples=num_traj_samples,
+        horizon=horizon,
+    )
+
+    monkeypatch.setattr(
+        alpamayo1_x_rl.models.expert_model.model.ExpertModelRL,
+        "from_pretrained",
+        lambda *args, **kwargs: fake_r1_model,
+    )
+    monkeypatch.setattr(
+        r1_inference_model,
+        "tokenize_for_generation",
+        lambda *args, **kwargs: {"input_ids": torch.zeros((1, 3), dtype=torch.int64)},
+    )
+
+    resolved_config_path = _write_resolved_config(
+        tmp_path,
+        scene_ids=["scene_000", "scene_001"],
+        policy_overrides={
+            "kind": "alpamayo",
+            "model": {
+                "kind": "alpamayo_r1",
+                "path": str(bundle_dir),
+                "dtype": "bfloat16",
+                "use_cameras": [_ALPAMAYO_TEST_CAMERA],
+                "num_context_frames": 1,
+                "num_historical_waypoints": 2,
+                "num_future_waypoints": horizon,
+            },
+            "inference": {
+                "sampling": {
+                    "top_p": 0.98,
+                    "top_k": None,
+                    "temperature": 0.6,
+                    "num_traj_samples": num_traj_samples,
+                    "num_traj_sets": num_traj_sets,
+                    "max_generation_length": None,
+                },
+            },
+        },
+        max_concurrent_rollouts=2,
+        simulation_timeout_s=30.0,
+        experiment_name="cosmos_alpamayo_r1_smoke",
+    )
+
+    class FakeAlpamayoDriverServer:
+        """Driver server stand-in that exposes its policy factory to the runner."""
+
+        def __init__(
+            self,
+            name: str,
+            max_concurrent_rollouts: int,
+            policy_factory: Any,
+            publish_host: str = "localhost",
+        ) -> None:
+            """Capture construction kwargs and stash the captured policy factory."""
+            self.name = name
+            self.max_concurrent_rollouts = max_concurrent_rollouts
+            self.policy_factory = policy_factory
+            self.topology_endpoint = TopologyEndpoint(
+                id=name,
+                host=publish_host,
+                port=43292,
+                capacity=max_concurrent_rollouts,
+            )
+
+        def start(self) -> None:
+            """Accept rollout-worker driver startup."""
+
+        def stop(self) -> None:
+            """Accept rollout-worker driver teardown."""
+
+    class FakeRegistry:
+        """Topology registry stand-in for the Alpamayo rollout test."""
+
+        published_drivers: list[TopologyEndpoint] = []
+
+        def __init__(self, registry_dir: str) -> None:
+            """Accept the configured registry directory."""
+            self.registry_dir = registry_dir
+
+        def acquire_alpasim_runtime(self, driver_id: str) -> TopologyEndpoint:
+            """Return one published AlpaSim RuntimeService endpoint."""
+            del driver_id
+            return TopologyEndpoint(
+                id="alpasim-runtime-0",
+                host="runtime.local",
+                port=6101,
+                capacity=1,
+            )
+
+        def list_alpasim_runtimes(self) -> list[TopologyEndpoint]:
+            """Return published runtime endpoints."""
+            return [
+                TopologyEndpoint(
+                    id="alpasim-runtime-0",
+                    host="runtime.local",
+                    port=6101,
+                    capacity=1,
+                )
+            ]
+
+        def publish_driver(self, endpoint: TopologyEndpoint) -> None:
+            """Record the rollout worker's driver endpoint."""
+            self.published_drivers.append(endpoint)
+
+    class FakeStreamingWorker:
+        """Streaming-worker stand-in that drives captured policies through the inference engine.
+
+        Replaces the real `StreamingRolloutWorker` so the test can exercise
+        `AlpagymRollout.init_engine` and `rollout_generation` without a real
+        AlpaSim runtime or gRPC channel. Each `submit_payload` call
+        synchronously walks the captured policy factory through the
+        long-lived inference engine thread (already running by the time
+        the test calls `rollout_generation`). Like the real worker it
+        produces in-memory ``EpisodeOutput`` completions; egress to a
+        transport happens later in the packer's ``get_rollout_output``.
+        """
+
+        def __init__(
+            self,
+            *,
+            alpasim_runtime_stub: Any,
+            driver_server: FakeAlpamayoDriverServer,
+            simulation_timeout_s: float,
+            reward_config: Any,
+            max_concurrent_rollouts: int,
+            rollouts_per_payload: int,
+            scene_id_resolver: Any,
+            max_scene_retries: int = 3,
+        ) -> None:
+            """Capture the wiring needed to drive policies for assertions."""
+            del alpasim_runtime_stub, reward_config, max_concurrent_rollouts, max_scene_retries
+            self._driver_server = driver_server
+            self._simulation_timeout_s = simulation_timeout_s
+            self._scene_id_resolver = scene_id_resolver
+            self._rollouts_per_payload = rollouts_per_payload
+            self.captured_outputs: dict[str, tuple[Any, ...]] = {}
+            self.driver_step_calls = 0
+
+        def submit_payload(self, payload: Any) -> Any:
+            """Drive one payload synchronously and return a resolved-future state."""
+            return self._drive_payload(payload)
+
+        def shutdown(self) -> None:
+            """No-op shutdown for the fake worker."""
+
+        def _drive_payload(self, payload: Any) -> Any:
+            """Walk one payload's `rollouts_per_payload` siblings through the policy factory."""
+            from concurrent.futures import Future
+
+            from alpagym_runtime.types import EpisodeOutput
+
+            factory = self._driver_server.policy_factory
+            scene_id = self._scene_id_resolver(payload)
+            episodes: list[Any] = []
+            for j in range(self._rollouts_per_payload):
+                session_uuid = f"sess-{scene_id}-{j}"
+                policy = factory(session_uuid, _alpamayo_test_calibration(), 0)
+                output = policy.step(_alpamayo_test_policy_input())
+                self.captured_outputs[session_uuid] = (output,)
+                policy.close()
+                self.driver_step_calls += 1
+                episodes.append(
+                    EpisodeOutput(
+                        scene_id=scene_id,
+                        session_uuid=session_uuid,
+                        num_steps=1,
+                        policy_outputs=(output,),
+                    )
+                )
+            future: Future = Future()
+            future.set_result(episodes)
+            return SimpleNamespace(
+                payload=payload,
+                n_target=self._rollouts_per_payload,
+                future=future,
+            )
+
+    class FakeChannel:
+        """Stand-in gRPC channel; the streaming worker only needs the stub."""
+
+        def __init__(self, target: str, options: Any = None) -> None:
+            """Capture target for diagnostics."""
+            del options
+            self.target = target
+
+    def fake_channel_ready_future(channel: Any) -> Any:
+        """Return an object whose `result(timeout=...)` is a no-op."""
+        del channel
+        return SimpleNamespace(result=lambda timeout: None)
+
+    monkeypatch.setattr(rollout_module, "StreamingRolloutWorker", FakeStreamingWorker)
+    monkeypatch.setattr(rollout_module, "EgodriverServer", FakeAlpamayoDriverServer)
+    monkeypatch.setattr(rollout_module, "FileTopologyRegistry", FakeRegistry)
+    monkeypatch.setattr(rollout_module, "RuntimeServiceStub", lambda channel: SimpleNamespace())
+    monkeypatch.setattr(rollout_module.grpc, "insecure_channel", FakeChannel)
+    monkeypatch.setattr(rollout_module.grpc, "channel_ready_future", fake_channel_ready_future)
+    FakeRegistry.published_drivers = []
+
+    config = SimpleNamespace(
+        custom={
+            "resolved_config_path": str(resolved_config_path),
+        }
+    )
+    rollout = RolloutRegistry.get_rollout_cls("alpagym_rollout")(config=config)
+    rollout.init_engine(quantization="none", seed=0, load_format="auto")
+    assert rollout.get_underlying_model() is fake_r1_model
+
+    class FakeWeightMapper:
+        """Weight mapper stand-in for the Cosmos rollout parameter-map path."""
+
+        @staticmethod
+        def rollout_map_local_key_to_hf_key(name: str) -> str:
+            """Leave fake parameter names unchanged."""
+            return name
+
+    assert rollout.model_param_map(FakeWeightMapper()) == {}
+    synced_r1_model = _FakeR1Model(
+        num_traj_sets=num_traj_sets,
+        num_traj_samples=num_traj_samples,
+        horizon=horizon,
+    )
+    rollout._model_param_map = {"stale": torch.tensor(1.0)}
+    rollout.set_underlying_model(synced_r1_model)
+    assert rollout.get_underlying_model() is synced_r1_model
+    assert rollout._model_param_map is None
+    assert rollout._inference_engine.get_model() is synced_r1_model
+
+    try:
+        results = rollout.rollout_generation(
+            payloads=[
+                SimpleNamespace(prompt_idx=0),
+                SimpleNamespace(prompt_idx=1),
+            ],
+            stream=None,
+            data_packer=packer_module.AlpagymDataPacker(
+                config=DataPackerConfig(expected_valid_steps=1),
+                build_model_inputs=functools.partial(
+                    AlpamayoR1InferenceModel.build_trainer_model_inputs,
+                    num_context_frames=1,
+                ),
+            ),
+        )
+
+        worker = cast(FakeStreamingWorker, rollout._worker)
+        expected_sessions = 2 * 2  # 2 scenes * n_generation=2
+
+        # End-to-end: inference_engine.run_loop() drained one drive per session and the
+        # fake R1 model was invoked once per drive.
+        assert worker.driver_step_calls == expected_sessions
+        assert fake_r1_model.call_count == 0
+        assert synced_r1_model.call_count == expected_sessions
+        assert len(synced_r1_model.sample_call_kwargs) == expected_sessions
+        for call_kwargs in synced_r1_model.sample_call_kwargs:
+            assert call_kwargs["return_extra"] is True
+            diffusion_kwargs = call_kwargs["diffusion_kwargs"]
+            assert isinstance(diffusion_kwargs, dict)
+            assert diffusion_kwargs["return_info"] is True
+        assert FakeRegistry.published_drivers[0].id.startswith("driver-")
+
+        # The public R1 smoke path requests replay traces for trainer-side packing.
+        assert len(worker.captured_outputs) == expected_sessions
+        for session_outputs in worker.captured_outputs.values():
+            assert len(session_outputs) == 1
+            for output in session_outputs:
+                assert output.replay_data is not None
+                assert output.replay_data.model_family == "alpamayo_r1"
+                assert output.replay_data.payload_schema == "alpamayo_r1.trajectory.v1"
+                assert output.chosen_logprob is not None
+                assert output.chosen_logprob.shape == (1,)
+                assert output.all_pred_xyz is not None
+                assert output.all_pred_xyz.shape == (
+                    num_traj_sets,
+                    num_traj_samples,
+                    horizon,
+                    3,
+                )
+                assert output.all_pred_quat is not None
+
+        # Rollout payloads → in-memory EpisodeOutput completions in order.
+        # Egress to a transport happens later in get_rollout_output, not here.
+        assert len(results) == 2
+        assert [len(result.completions) for result in results] == [2, 2]
+        completion_scene_ids = [
+            {completion.scene_id for completion in result.completions} for result in results
+        ]
+        assert completion_scene_ids == [{"scene_000"}, {"scene_001"}]
+    finally:
+        rollout.shutdown()

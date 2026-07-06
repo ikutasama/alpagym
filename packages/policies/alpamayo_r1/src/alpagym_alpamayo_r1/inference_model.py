@@ -16,10 +16,6 @@ from alpagym_runtime.inference.types import (
     ModelOutput,
     drop_single_batch_axis,
 )
-from alpagym_runtime.policies.alpamayo.determinism import (
-    merge_batched_outputs,
-    seeded_diffusion_kwargs,
-)
 from alpagym_runtime.replay import ActionSelection, PolicyReplayData, require_payload_keys
 
 from alpagym_alpamayo_r1.tokenize_online import tokenize_for_generation
@@ -105,44 +101,6 @@ class AlpamayoR1InferenceModel:
                 f"num_traj_samples={sampling.num_traj_samples}."
             )
 
-        if sampling.force_determinism:
-            return self._sample_trajectories_with_determinism(
-                model_input,
-                sampling,
-                return_trace_for_rl=return_trace_for_rl,
-            )
-        return self._sample_trajectories(
-            model_input,
-            sampling,
-            return_trace_for_rl=return_trace_for_rl,
-        )
-
-    def _sample_trajectories_with_determinism(
-        self,
-        model_input: BatchedModelInput,
-        sampling: SamplingParamsConfig,
-        return_trace_for_rl: bool,
-    ) -> BatchedModelOutput:
-        """Sample each batch row independently with its queued seed."""
-        batch_size = model_input.camera_frames.shape[0]
-        outputs: list[BatchedModelOutput] = []
-        for batch_index in range(batch_size):
-            outputs.append(
-                self._sample_trajectories(
-                    _slice_batched_model_input(model_input, batch_index),
-                    sampling,
-                    return_trace_for_rl=return_trace_for_rl,
-                )
-            )
-        return merge_batched_outputs(outputs)
-
-    def _sample_trajectories(
-        self,
-        model_input: BatchedModelInput,
-        sampling: SamplingParamsConfig,
-        return_trace_for_rl: bool,
-    ) -> BatchedModelOutput:
-        """Run one Alpamayo model call for the provided batch."""
         batch_size = model_input.camera_frames.shape[0]
         data = build_alpamayo_r1_forward_inputs(
             model_input,
@@ -182,13 +140,17 @@ class AlpamayoR1InferenceModel:
         # the schema because the unpack depends on it.
         diffusion_kwargs["return_info"] = True
         if sampling.force_determinism:
-            seed = int(model_input.seed.detach().cpu().reshape(batch_size)[0])
-            diffusion_kwargs.update(
-                seeded_diffusion_kwargs(
-                    seed,
-                    model_input.ego_history_xyz.device,
+            # One generator per row, repeated across the row's candidates, keeps
+            # the single batched forward reproducible from each row's seed.
+            generators: list[torch.Generator] = []
+            for seed in model_input.seed.tolist():
+                generator = torch.Generator(device=model_input.ego_history_xyz.device).manual_seed(
+                    int(seed)
                 )
-            )
+                generators.extend(
+                    generator for _ in range(sampling.num_traj_sets * sampling.num_traj_samples)
+                )
+            diffusion_kwargs["generator"] = generators
 
         kwargs: dict[str, Any] = {
             "with_vlm_rollout": with_vlm_rollout,
@@ -421,22 +383,6 @@ def _unpack_sde_tuple(
     if not isinstance(sde_info, dict):
         raise TypeError(f"Alpamayo R1 4-tuple sde_info must be dict; got {type(sde_info).__name__}")
     return pred_xyz, pred_rot, logprob, sde_info
-
-
-def _slice_batched_model_input(
-    model_input: BatchedModelInput,
-    batch_index: int,
-) -> BatchedModelInput:
-    """Return a B=1 view of one queued rollout request."""
-    return BatchedModelInput(
-        ego_history_xyz=model_input.ego_history_xyz[batch_index : batch_index + 1],
-        ego_history_rot=model_input.ego_history_rot[batch_index : batch_index + 1],
-        camera_frames=model_input.camera_frames[batch_index : batch_index + 1],
-        camera_indices=model_input.camera_indices[batch_index : batch_index + 1],
-        relative_timestamps=model_input.relative_timestamps[batch_index : batch_index + 1],
-        route_xy=model_input.route_xy[batch_index : batch_index + 1],
-        seed=model_input.seed[batch_index : batch_index + 1],
-    )
 
 
 def _pack_replay_extra(

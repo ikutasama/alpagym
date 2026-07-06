@@ -220,8 +220,8 @@ def test_diffusion_kwargs_filter_none_and_force_return_info() -> None:
     }
 
 
-def test_deterministic_sampling_adds_seeded_generator() -> None:
-    """Deterministic R1 sampling seeds the diffusion generator for the request."""
+def test_deterministic_sampling_adds_per_row_generator_list() -> None:
+    """Deterministic R1 sampling passes a per-row generator list in one batched forward."""
     seeded_inputs = _make_batched_input(seed=torch.tensor([31], dtype=torch.int64))
     model = _make_mock_model(_make_sde_tuple())
     adapter = AlpamayoR1InferenceModel(model=model, num_context_frames=_NUM_CONTEXT_FRAMES)
@@ -231,26 +231,18 @@ def test_deterministic_sampling_adds_seeded_generator() -> None:
         _make_sampling(force_determinism=True),
     )
 
+    assert model.sample_trajectories_from_data.call_count == 1
     diffusion_kwargs = model.sample_trajectories_from_data.call_args.kwargs["diffusion_kwargs"]
     assert diffusion_kwargs["int_method"] == "sde"
-    assert diffusion_kwargs["noise_level"] == 0.4
     assert diffusion_kwargs["return_info"] is True
-    generator = diffusion_kwargs["generator"]
-    assert isinstance(generator, torch.Generator)
-    assert generator.initial_seed() == 31
+    generators = diffusion_kwargs["generator"]
+    assert isinstance(generators, list)
+    assert [generator.initial_seed() for generator in generators] == [31]
 
 
-def test_deterministic_sampling_splits_batched_inputs_by_seed() -> None:
-    """A deterministic B>1 call is replayed as B single-row calls with per-session seeds."""
-    model = MagicMock()
-
-    def sample_side_effect(data: dict[str, Any], **kwargs: Any) -> tuple[Any, ...]:
-        generator = kwargs["diffusion_kwargs"]["generator"]
-        seed = generator.initial_seed()
-        assert data["image_frames"].shape[0] == 1
-        return _make_sde_tuple(batch_size=1, sample_offset=float(seed))
-
-    model.sample_trajectories_from_data = MagicMock(side_effect=sample_side_effect)
+def test_deterministic_sampling_seeds_each_row_in_one_batched_forward() -> None:
+    """A deterministic B>1 call runs once with one generator per row (no unbatching)."""
+    model = _make_mock_model(_make_sde_tuple(batch_size=2))
     adapter = AlpamayoR1InferenceModel(model=model, num_context_frames=_NUM_CONTEXT_FRAMES)
     seeded_inputs = _make_batched_input(
         batch_size=2,
@@ -263,22 +255,15 @@ def test_deterministic_sampling_splits_batched_inputs_by_seed() -> None:
         return_trace_for_rl=True,
     )
 
-    assert model.sample_trajectories_from_data.call_count == 2
-    generators = [
-        call.kwargs["diffusion_kwargs"]["generator"]
-        for call in model.sample_trajectories_from_data.call_args_list
-    ]
+    assert model.sample_trajectories_from_data.call_count == 1
+    call = model.sample_trajectories_from_data.call_args
+    assert call.args[0]["image_frames"].shape[0] == 2
+    generators = call.kwargs["diffusion_kwargs"]["generator"]
+    assert isinstance(generators, list)
+    # One generator per row in input order (num_traj_sets * num_traj_samples == 1).
     assert [generator.initial_seed() for generator in generators] == [31, 37]
     assert output.pred_xyz.shape[0] == 2
-    assert output.extra["samples_list"].shape[0] == 2
-    assert output.extra["timesteps"].shape[0] == 2
     assert len(output.unbind()) == 2
-
-    # Merge must keep input row order: row 0 ran with seed 31, row 1 with seed 37, and the
-    # side effect offsets every ``samples_list`` value by the seed (arange starts at 0). A
-    # reversed merge would swap these while still passing every assertion above.
-    assert output.extra["samples_list"][0].flatten()[0] == 31.0
-    assert output.extra["samples_list"][1].flatten()[0] == 37.0
 
 
 def test_return_extra_follows_trace_flag() -> None:

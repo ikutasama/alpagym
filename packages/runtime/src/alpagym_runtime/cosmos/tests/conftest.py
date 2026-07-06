@@ -126,6 +126,8 @@ def _install_cosmos_stubs() -> None:
         transformers.PreTrainedModel = PreTrainedModel
         sys.modules["transformers"] = transformers
 
+    _install_alpamayo_r1_recipe_stubs()
+
     cosmos_rl: Any = types.ModuleType("cosmos_rl")
     sys.modules["cosmos_rl"] = cosmos_rl
 
@@ -406,6 +408,58 @@ def _install_cosmos_stubs() -> None:
         "alpagym_runtime.cosmos.packer",
     ):
         sys.modules.pop(module_name, None)
+
+
+def _install_alpamayo_r1_recipe_stubs() -> None:
+    """Install R1 recipe stubs only when the real package is unavailable."""
+    model_module_name = "alpamayo1_x_rl.models.expert_model.model"
+    if model_module_name in sys.modules:
+        return
+    try:
+        recipe_model_spec = importlib.util.find_spec(model_module_name)
+    except (ImportError, ModuleNotFoundError, ValueError):
+        recipe_model_spec = None
+    if recipe_model_spec is not None:
+        return
+
+    alpamayo1_x_rl: Any = types.ModuleType("alpamayo1_x_rl")
+    alpamayo1_x_rl_models: Any = types.ModuleType("alpamayo1_x_rl.models")
+    alpamayo1_x_rl_expert_model: Any = types.ModuleType("alpamayo1_x_rl.models.expert_model")
+    alpamayo1_x_rl_expert_model_model: Any = types.ModuleType(model_module_name)
+    alpamayo1_x_rl_cosmos_wrapper: Any = types.ModuleType(
+        "alpamayo1_x_rl.models.expert_model.cosmos_wrapper"
+    )
+
+    class ExpertModelRL:
+        """Tiny stand-in for the R1 recipe model; tests monkeypatch `from_pretrained`."""
+
+        @classmethod
+        def from_pretrained(cls, *args: object, **kwargs: object) -> object:
+            """Default implementation rejects calls; tests must monkeypatch."""
+            del args, kwargs
+            raise NotImplementedError(
+                "ExpertModelRL.from_pretrained must be monkeypatched in tests"
+            )
+
+    class ExpertModelCosmos:
+        """Tiny stand-in for the R1 Cosmos wrapper."""
+
+        def forward(self, *args: object, **kwargs: object) -> object:
+            """Default implementation rejects calls; tests must monkeypatch."""
+            del args, kwargs
+            raise NotImplementedError("ExpertModelCosmos.forward must be monkeypatched in tests")
+
+    alpamayo1_x_rl_expert_model_model.ExpertModelRL = ExpertModelRL
+    alpamayo1_x_rl_cosmos_wrapper.ExpertModelCosmos = ExpertModelCosmos
+    alpamayo1_x_rl_expert_model.model = alpamayo1_x_rl_expert_model_model
+    alpamayo1_x_rl_expert_model.cosmos_wrapper = alpamayo1_x_rl_cosmos_wrapper
+    alpamayo1_x_rl_models.expert_model = alpamayo1_x_rl_expert_model
+    alpamayo1_x_rl.models = alpamayo1_x_rl_models
+    sys.modules["alpamayo1_x_rl"] = alpamayo1_x_rl
+    sys.modules["alpamayo1_x_rl.models"] = alpamayo1_x_rl_models
+    sys.modules["alpamayo1_x_rl.models.expert_model"] = alpamayo1_x_rl_expert_model
+    sys.modules[model_module_name] = alpamayo1_x_rl_expert_model_model
+    sys.modules["alpamayo1_x_rl.models.expert_model.cosmos_wrapper"] = alpamayo1_x_rl_cosmos_wrapper
 
 
 @pytest.fixture

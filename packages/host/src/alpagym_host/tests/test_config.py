@@ -31,7 +31,7 @@ def test_host_writes_and_loads_handoff_artifacts(
 ) -> None:
     """Writes generated handoff artifacts and loads the resolved host config."""
     register_config_schema()
-    model_path = tmp_path / "model_bundle"
+    model_path = tmp_path / "alpamayo_r1_bundle"
     with initialize_config_module(version_base=None, config_module="alpagym_host.conf"):
         cfg = compose(
             config_name="default",
@@ -97,6 +97,9 @@ def test_host_writes_and_loads_handoff_artifacts(
     assert "grpo_optimization_iterations" not in cosmos_config["train"]["train_policy"]
     assert cosmos_config["train"]["train_batch_per_replica"] == 3
     assert cosmos_config["train"]["epoch"] == 5
+    # resume is tied to autoresume; a normal run starts fresh rather than
+    # loading a checkpoint from a reused run_dir.
+    assert cosmos_config["train"]["resume"] is False
     assert cosmos_config["logging"]["log_interval"] == 7
     assert cosmos_config["policy"]["model_name_or_path"] == model_path.as_posix()
     assert cosmos_config["policy"]["parallelism"]["tp_size"] == 2
@@ -149,7 +152,7 @@ def test_dataset_selector_rejects_scene_ids_and_test_suite(tmp_path: Path) -> No
                 f"run_root={tmp_path.as_posix()}",
                 "deploy=local",
                 "topology=local_colocated_1gpu",
-                *_model_overrides(tmp_path),
+                *_alpamayo_r1_model_overrides(tmp_path),
                 "dataset.scene_ids=[scene_a]",
                 "dataset.test_suite_id=alpagym_smoke",
             ],
@@ -160,6 +163,72 @@ def test_dataset_selector_rejects_scene_ids_and_test_suite(tmp_path: Path) -> No
 
     with pytest.raises(ValueError, match="exactly one"):
         validate_run_config(run_config, requested_command="run")
+
+
+def test_nccl_test_model_requires_paired_backend_and_scenes(tmp_path: Path) -> None:
+    """`nccl_test_model` requires its paired synthetic `alpagym_nccl_rollout` backend (both
+    directions), `transport=nccl`, and `dataset.scene_ids`.
+    """
+    register_config_schema()
+    model_path = _write_hf_bundle_dir(tmp_path)
+
+    def _run_config(overrides: list[str]) -> RunConfig:
+        with initialize_config_module(version_base=None, config_module="alpagym_host.conf"):
+            cfg = compose(
+                config_name="default",
+                overrides=[
+                    f"run_root={tmp_path.as_posix()}",
+                    "deploy=local",
+                    "topology=local_disaggregated_2gpu",
+                    f"policy.model.path={model_path.as_posix()}",
+                    *overrides,
+                ],
+            )
+        return build_run_config(cfg, build_artifact_paths(cfg))
+
+    def _validate(overrides: list[str]) -> None:
+        validate_run_config(_run_config(overrides), requested_command="run")
+
+    # nccl_test_model with the default alpagym_rollout backend -> rejected (forward).
+    with pytest.raises(ValueError, match="must be set together"):
+        _validate(["policy.model.kind=nccl_test_model"])
+
+    # synthetic backend with a non-nccl kind -> rejected (reverse).
+    with pytest.raises(ValueError, match="must be set together"):
+        _validate(["policy.model.kind=alpamayo_r1", "cosmos.rollout.backend=alpagym_nccl_rollout"])
+
+    # correctly paired but on the default disk transport -> rejected (the check would
+    # never touch NCCL).
+    with pytest.raises(ValueError, match="requires transport=nccl"):
+        _validate(
+            [
+                "policy.model.kind=nccl_test_model",
+                "cosmos.rollout.backend=alpagym_nccl_rollout",
+                "dataset.scene_ids=[nccl-scene-000]",
+            ]
+        )
+
+    # correctly paired but without scene_ids -> rejected.
+    with pytest.raises(ValueError, match="requires dataset.scene_ids"):
+        _validate(
+            [
+                "policy.model.kind=nccl_test_model",
+                "cosmos.rollout.backend=alpagym_nccl_rollout",
+                "transport=nccl",
+                "dataset.scene_ids=null",
+                "dataset.test_suite_id=alpagym_smoke",
+            ]
+        )
+
+    # correctly paired, on nccl transport, with scene_ids -> passes.
+    _validate(
+        [
+            "policy.model.kind=nccl_test_model",
+            "cosmos.rollout.backend=alpagym_nccl_rollout",
+            "transport=nccl",
+            "dataset.scene_ids=[nccl-scene-000]",
+        ]
+    )
 
 
 def test_topology_preset_selects_separate_nodes_schema(tmp_path: Path) -> None:
@@ -176,7 +245,7 @@ def test_topology_preset_selects_separate_nodes_schema(tmp_path: Path) -> None:
                 "execution.slurm.partition=batch",
                 "execution.slurm.account=research",
                 "policy.model.kind=alpamayo_r1",
-                f"policy.model.path={(tmp_path / 'model_bundle').as_posix()}",
+                f"policy.model.path={(tmp_path / 'alpamayo_r1_bundle').as_posix()}",
             ],
         )
 
@@ -228,7 +297,7 @@ def test_host_writes_disaggregated_cosmos_config_for_slurm(
                 f"cache_root_dir={(tmp_path / 'cache').as_posix()}",
                 "execution.slurm.partition=batch",
                 "execution.slurm.account=research",
-                *_model_overrides(tmp_path),
+                *_alpamayo_r1_model_overrides(tmp_path),
             ],
         )
 
@@ -264,7 +333,10 @@ def test_cosmos_config_extracts_real_model_tarball(tmp_path: Path) -> None:
     extracted_bundle_dir = artifact_paths.policy_model_bundle_dir
     assert cosmos_config["policy"]["model_name_or_path"] == str(extracted_bundle_dir)
     assert run_config.policy.model.path == str(extracted_bundle_dir)
-    assert json.loads((extracted_bundle_dir / "config.json").read_text())["model_type"] == "alpamayo_r1"
+    assert (
+        json.loads((extracted_bundle_dir / "config.json").read_text())["model_type"]
+        == "alpamayo_r1"
+    )
 
 
 def test_load_or_create_run_config_validates_before_writing_artifacts(
@@ -294,7 +366,7 @@ def test_load_or_create_run_config_validates_before_writing_artifacts(
                 "deploy=local",
                 "topology=local_colocated_1gpu",
                 "policy.model.kind=alpamayo_r1",
-                f"policy.model.path={(tmp_path / 'model_bundle').as_posix()}",
+                f"policy.model.path={(tmp_path / 'alpamayo_r1_bundle').as_posix()}",
             ],
         )
 
@@ -699,7 +771,7 @@ def test_slurm_distributed_shared_cosmos_2_3_preset_keeps_coupled_run_shape(
     assert run_config.execution.slurm.nodes == topology.cosmos_nodes + topology.alpasim_nodes
     assert topology.cosmos_nodes == 2
     assert topology.alpasim_nodes == 3
-    assert run_config.transport.kind is TransportKind.disk
+    assert run_config.transport.kind is TransportKind.nccl
     assert (
         "runtime.simulation_config.n_sim_steps=30" in run_config.alpasim.wizard_args.extra_overrides
     )
@@ -847,7 +919,7 @@ def _make_run_config(tmp_path: Path, *overrides: str) -> RunConfig:
     if not any(override.startswith("policy.model.kind=") for override in overrides):
         base_overrides.append("policy.model.kind=alpamayo_r1")
     if not any(override.startswith("policy.model.path=") for override in overrides):
-        base_overrides.append(f"policy.model.path={(tmp_path / 'model_bundle').as_posix()}")
+        base_overrides.append(f"policy.model.path={(tmp_path / 'alpamayo_r1_bundle').as_posix()}")
     with initialize_config_module(version_base=None, config_module="alpagym_host.conf"):
         cfg = compose(
             config_name="default",
@@ -857,11 +929,11 @@ def _make_run_config(tmp_path: Path, *overrides: str) -> RunConfig:
     return build_run_config(cfg, artifact_paths)
 
 
-def _model_overrides(tmp_path: Path) -> list[str]:
-    """Return policy overrides for tests that do not validate model files."""
+def _alpamayo_r1_model_overrides(tmp_path: Path) -> list[str]:
+    """Return Alpamayo R1 policy overrides for tests that do not validate model files."""
     return [
         "policy.model.kind=alpamayo_r1",
-        f"policy.model.path={(tmp_path / 'model_bundle').as_posix()}",
+        f"policy.model.path={(tmp_path / 'alpamayo_r1_bundle').as_posix()}",
     ]
 
 
@@ -873,9 +945,11 @@ def _write_hf_bundle_dir(
     weight_filename: str = "model.safetensors",
 ) -> Path:
     """Create a minimal local HF bundle directory."""
-    bundle_dir = tmp_path / "model_bundle"
+    bundle_dir = tmp_path / "alpamayo_r1_bundle"
     bundle_dir.mkdir()
-    (bundle_dir / "config.json").write_text(json.dumps({"model_type": "alpamayo_r1"}), encoding="utf-8")
+    (bundle_dir / "config.json").write_text(
+        json.dumps({"model_type": "alpamayo_r1"}), encoding="utf-8"
+    )
     if include_weight_file:
         (bundle_dir / weight_filename).write_text("weights", encoding="utf-8")
     if include_shard_index:

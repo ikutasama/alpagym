@@ -50,6 +50,31 @@ def test_validate_run_config_rejects_non_identity_slurm_artifact_mount(
         validate_run_config(resolved_config, "run")
 
 
+def test_validate_run_config_rejects_autoresume_without_checkpointing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Autoresume without checkpointing would loop forever from scratch, so reject it."""
+    resolved_config = _compose_slurm_test_config(
+        tmp_path,
+        monkeypatch,
+        overrides=[
+            "execution.slurm.autoresume=true",
+            "cosmos.train.ckpt.enable_checkpoint=false",
+        ],
+    )
+    with pytest.raises(ValueError, match="autoresume requires cosmos.train.ckpt.enable_checkpoint"):
+        validate_run_config(resolved_config, "run")
+
+
+def test_validate_run_config_rejects_autoresume_on_non_slurm_backend(tmp_path: Path) -> None:
+    """Autoresume on a local backend would be silently ignored, so reject it."""
+    cfg = _compose_test_config(tmp_path, overrides=["execution.slurm.autoresume=true"])
+    resolved_config = build_run_config(cfg, build_artifact_paths(cfg))
+    with pytest.raises(ValueError, match="autoresume requires execution.backend to be a Slurm"):
+        validate_run_config(resolved_config, "run")
+
+
 def test_validate_run_config_ignores_none_slurm_mount_sources(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

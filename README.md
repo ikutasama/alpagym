@@ -85,7 +85,7 @@ workspace is designed to make adding new packages straightforward.
 - **`packages/policies`** — the driving policies. Currently the Alpamayo 1.5
   policy bundle, configs, tokenizer, and checkpoint conversion script.
 - **`packages/alpasim_configs`** — AlpaSim topology configs used by AlpaGym.
-- **`packages/plugins`** — utilities for discovering optioninal plugin packages.
+- **`packages/plugins`** — utilities for discovering optional plugin packages.
 
 ### End-to-End Run Flow
 

@@ -33,9 +33,9 @@ def test_policy_replay_data_round_trips_opaque_payload_and_common_old_logprob() 
     """Shared replay preserves opaque payload data without family-specific parsing."""
     replay = PolicyReplayData(
         replay_schema_version=1,
-        payload_schema="alpamayo_r1.trajectory.v1",
+        payload_schema="generic.trajectory.v1",
         payload_schema_version=1,
-        model_family="alpamayo_r1",
+        model_family="generic",
         action_selection=ActionSelection(set_ix=0, sample_ix=0),
         old_logprob=torch.tensor(-2.5, dtype=torch.float32),
         payload={
@@ -62,8 +62,8 @@ def test_policy_replay_data_round_trips_opaque_payload_and_common_old_logprob() 
 
     parsed = parse_policy_replay_data(replay.to_dict())
 
-    assert parsed.model_family == "alpamayo_r1"
-    assert parsed.payload_schema == "alpamayo_r1.trajectory.v1"
+    assert parsed.model_family == "generic"
+    assert parsed.payload_schema == "generic.trajectory.v1"
     assert isinstance(parsed.payload, dict)
     assert "old_logprob" not in parsed.payload
     assert torch.equal(torch.as_tensor(parsed.old_logprob), torch.tensor(-2.5))
@@ -84,9 +84,9 @@ def test_policy_replay_data_to_dict_preserves_non_leaf_tensors() -> None:
     non_leaf = source * 2.0
     replay = PolicyReplayData(
         replay_schema_version=1,
-        payload_schema="alpamayo_r1.trajectory.v1",
+        payload_schema="generic.trajectory.v1",
         payload_schema_version=1,
-        model_family="alpamayo_r1",
+        model_family="generic",
         action_selection=ActionSelection(set_ix=0, sample_ix=0),
         old_logprob=non_leaf[0],
         payload={"selected_future": non_leaf},
@@ -120,9 +120,9 @@ def test_shared_replay_schema_does_not_validate_family_payload_fields() -> None:
     """Family-required fields are checked by the family packer, not replay.py."""
     replay = PolicyReplayData(
         replay_schema_version=1,
-        payload_schema="alpamayo_r1.trajectory.v1",
+        payload_schema="generic.trajectory.v1",
         payload_schema_version=1,
-        model_family="alpamayo_r1",
+        model_family="generic",
         action_selection=ActionSelection(set_ix=0, sample_ix=0),
         old_logprob=torch.tensor(-1.0),
         payload={"sampled_action": torch.zeros((2, 3))},
@@ -157,9 +157,9 @@ def test_replay_schema_rejects_unknown_versions() -> None:
     """Schema version mismatches fail at the replay envelope boundary."""
     replay = PolicyReplayData(
         replay_schema_version=2,
-        payload_schema="alpamayo_r1.trajectory.v1",
+        payload_schema="generic.trajectory.v1",
         payload_schema_version=1,
-        model_family="alpamayo_r1",
+        model_family="generic",
         action_selection=ActionSelection(set_ix=0, sample_ix=0),
         old_logprob=torch.tensor(0.0),
         payload={},
@@ -173,9 +173,9 @@ def test_replay_schema_rejects_non_string_payload_schema() -> None:
     """Corrupt envelopes must not coerce missing schemas into string values."""
     replay = PolicyReplayData(
         replay_schema_version=1,
-        payload_schema="alpamayo_r1.trajectory.v1",
+        payload_schema="generic.trajectory.v1",
         payload_schema_version=1,
-        model_family="alpamayo_r1",
+        model_family="generic",
         action_selection=ActionSelection(set_ix=0, sample_ix=0),
         old_logprob=torch.tensor(0.0),
         payload={},
@@ -190,9 +190,9 @@ def test_replay_payload_round_trips_scalar_old_logprob() -> None:
     """Replay envelopes preserve scalar old-logprob values."""
     replay = PolicyReplayData(
         replay_schema_version=1,
-        payload_schema="alpamayo_r1.trajectory.v1",
+        payload_schema="generic.trajectory.v1",
         payload_schema_version=1,
-        model_family="alpamayo_r1",
+        model_family="generic",
         action_selection=ActionSelection(set_ix=0, sample_ix=0),
         old_logprob=torch.tensor(0.0),
         payload={},

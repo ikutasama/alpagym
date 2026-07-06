@@ -289,6 +289,10 @@ class CosmosRLRolloutConfig:
     n_generation: int
     batch_size: int
     parallelism: CosmosRLRolloutParallelismConfig
+    # Registered cosmos-rl rollout backend that drives generation. Real runs use
+    # ``alpagym_rollout`` (AlpaSim + policy inference); the NCCL transport stress
+    # check overrides this to ``alpagym_nccl_rollout`` (synthetic episodes).
+    backend: str = "alpagym_rollout"
     # Forwarded to cosmos-rl's RolloutConfig.prefetch_rollout. When true,
     # cosmos-rl's _prefetch_loop calls the streaming backend's
     # `enqueue_prefetch_payloads` hook ahead of the next
@@ -490,6 +494,9 @@ class SlurmConfig:
     export_env: list[str] = field(default_factory=list)
     qos: str | None = None
     mem: str | None = None
+    # Requeue the job on the pre-timeout SIGUSR1 and resume from the latest
+    # checkpoint. Requires cosmos.train.ckpt.enable_checkpoint.
+    autoresume: bool = False
 
 
 class ExecutionBackend(StrEnum):
@@ -569,6 +576,11 @@ RunConfigT = TypeVar("RunConfigT", bound=RunConfig)
 def register_config_schema() -> None:
     """Register the root host config schema with Hydra's ConfigStore."""
     OmegaConf.register_new_resolver(
+        "alpasim_repo_url",
+        _resolve_alpasim_repo_url,
+        replace=True,
+    )
+    OmegaConf.register_new_resolver(
         "alpasim_grpc_repo_ref",
         _resolve_alpasim_grpc_repo_ref,
         replace=True,
@@ -594,6 +606,19 @@ def register_config_schema() -> None:
         node=SeparateNodesSlurmTopologyConfig,
         package="execution.slurm.topology",
     )
+
+
+def _resolve_alpasim_repo_url() -> str:
+    """Read the AlpaSim repo URL pinned by the workspace.
+
+    The `alpasim-grpc` source points at the `src/grpc` subdirectory, so its `git`
+    value is the full repo URL the Wizard runtime checkout clones. Deriving both
+    the runtime `repo_url` and the grpc `repo_ref` from this one pin keeps the
+    Wizard server and the compiled proto stubs on the same repo@rev.
+    """
+    workspace_pyproject = alpagym_project_root() / "pyproject.toml"
+    workspace_project = tomllib.loads(workspace_pyproject.read_text(encoding="utf-8"))
+    return workspace_project["tool"]["uv"]["sources"]["alpasim-grpc"]["git"]
 
 
 def _resolve_alpasim_grpc_repo_ref() -> str:
