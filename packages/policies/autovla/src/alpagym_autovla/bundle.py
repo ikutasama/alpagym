@@ -19,21 +19,29 @@ logger = logging.getLogger(__name__)
 def install_autovla_runtime_bridge() -> None:
     """Register AutoVLA's Qwen2.5-VL model and weight mapper in Cosmos-RL.
 
-    The default HFModelWeightMapper only handles LLM parameters (model.*,
-    lm_head.*) and silently skips the vision encoder (visual.*), producing
-    "No send instructions generated" warnings that block parameter sync.
+    Cosmos-RL auto-discovers and registers a built-in
+    ``Qwen2_5_VLConditionalModel`` for model_type ``qwen2_5_vl`` at import
+    time.  Attempting to register our custom classes for the same
+    model_type raises ``ValueError``.
 
-    We register a custom Qwen2_5_VLWeightMapper that passes visual.* keys
-    through as-is, plus a minimal BaseModel wrapper for single-GPU smoke
-    tests.
+    We try to register our custom ``Qwen2_5_VLWeightMapper`` (which routes
+    ``visual.*`` keys that the default mapper skips).  If the built-in is
+    already registered we fall back to it — sufficient for single-GPU
+    smoke tests where no cross-process weight sync is needed.
     """
     from cosmos_rl.policy.model.base import ModelRegistry
     from alpagym_autovla.cosmos_bridge import Qwen2_5_VLBaseModel, Qwen2_5_VLWeightMapper
 
-    ModelRegistry.register_model(
-        Qwen2_5_VLBaseModel,
-        Qwen2_5_VLWeightMapper,
-    )
+    try:
+        ModelRegistry.register_model(
+            Qwen2_5_VLBaseModel,
+            Qwen2_5_VLWeightMapper,
+        )
+    except ValueError:
+        logger.debug(
+            "qwen2_5_vl already registered by Cosmos-RL auto-discovery; "
+            "using built-in model."
+        )
 
 
 def setup_tokenizer(config: Any) -> Any | None:
