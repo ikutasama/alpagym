@@ -3,6 +3,10 @@ set -euo pipefail
 
 cd "${ALPAGYM_ROOT:-$HOME/alpagym}"
 
+# Clean up previous smoke run artifacts (each smoke is self-contained; failed
+# runs leave ~3-6GB of JSON per rollout that is never read back).
+find "${ALPAGYM_ROOT:-$HOME/alpagym}/tmp/alpagym-runs" -mindepth 1 -delete 2>/dev/null || true
+
 docker compose down 2>/dev/null || true
 
 export GRPC_ARG_ENABLE_HTTP_PROXY="${GRPC_ARG_ENABLE_HTTP_PROXY:-0}"
