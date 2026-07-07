@@ -81,18 +81,34 @@ def load_inference_model(
 
     bundle_dir = Path(model_config.path)
 
-    # Load Qwen2.5-VL backbone
+    # VLM path: AutoVLA bundles have a vlm/ subdir; raw Qwen checkpoints don't.
+    vlm_path = bundle_dir / "vlm"
+    if not vlm_path.is_dir():
+        vlm_path = bundle_dir
+
     vlm = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        str(bundle_dir / "vlm"),
+        str(vlm_path),
         torch_dtype=dtype,
         device_map=str(device),
         attn_implementation="sdpa",
     )
-    processor = AutoProcessor.from_pretrained(str(bundle_dir / "vlm"))
+    processor = AutoProcessor.from_pretrained(str(vlm_path))
 
-    # Load action tokenizer with codebook
+    # Action tokenizer codebook: try bundle dir, then AUTOVLA_REPO_PATH.
+    import os
     import pickle
     codebook_path = bundle_dir / "codebook_cache" / "agent_vocab.pkl"
+    if not codebook_path.exists():
+        repo = Path(os.environ.get("AUTOVLA_REPO_PATH", ""))
+        if repo.is_dir():
+            codebook_path = repo / "codebook_cache" / "agent_vocab.pkl"
+    if not codebook_path.exists():
+        raise FileNotFoundError(
+            f"agent_vocab.pkl not found. Checked:\n"
+            f"  {bundle_dir}/codebook_cache/agent_vocab.pkl\n"
+            f"  $AUTOVLA_REPO_PATH/codebook_cache/agent_vocab.pkl\n"
+            f"Set model.path to an AutoVLA bundle, or set AUTOVLA_REPO_PATH."
+        )
     with open(codebook_path, "rb") as f:
         codebook_data = pickle.load(f)
 
