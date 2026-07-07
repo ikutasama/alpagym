@@ -27,7 +27,7 @@ alpasim:
     control_timestep_us: 200_000
     force_gt_duration_us: 1_600_000
     n_sim_steps: 24
-    extra_overrides: "+cameras=4cam_1080 runtime.simulation_config.pose_reporting_interval_us=100000"
+    extra_overrides: "runtime.simulation_config.pose_reporting_interval_us=100000"
 
 cosmos:
   mode: colocated
