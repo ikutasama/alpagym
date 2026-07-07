@@ -49,7 +49,7 @@ cosmos:
     train_policy:
       mini_batch: 1
       grpo_optimization_iterations: 1
-      kl_beta: 0.04
+      kl_beta: 0.0
   rollout:
     n_generation: 2
     batch_size: 1
