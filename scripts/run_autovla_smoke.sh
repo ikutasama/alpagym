@@ -25,6 +25,15 @@ export CARGO_HTTP_CHECK_REVOKE="${CARGO_HTTP_CHECK_REVOKE:-false}"
 export CARGO_NET_GIT_FETCH_WITH_CLI="${CARGO_NET_GIT_FETCH_WITH_CLI:-true}"
 export AUTOVLA_REPO_PATH="${AUTOVLA_REPO_PATH:-/mnt/mnt_m62/10_personal/z59900495/workspace/AutoVLA}"
 
+# HF token: read from env or local file, never hardcoded in this repo.
+if [ -z "${HF_TOKEN:-}" ]; then
+  if [ -f "$HOME/.cache/huggingface/token" ]; then
+    export HF_TOKEN="$(cat "$HOME/.cache/huggingface/token")"
+  elif [ -f "$HOME/.alpagym_env" ]; then
+    source "$HOME/.alpagym_env"
+  fi
+fi
+
 EXPERIMENT="${EXPERIMENT:-autovla_local_smoke}"
 REWARD="${REWARD:-progress_safety}"
 MODEL_PATH="${MODEL_PATH:-/mnt/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Qwen/Qwen2.5-VL-3B-Instruct}"
