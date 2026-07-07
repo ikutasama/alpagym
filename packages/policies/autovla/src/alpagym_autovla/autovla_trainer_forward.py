@@ -75,14 +75,18 @@ def _build_qwen_inputs_for_training(
     ``pixel_values`` / ``input_ids`` match what the rollout used.
     """
     from PIL import Image
+    import numpy as np
 
     processor = _get_processor()
 
     num_cams = camera_frames.shape[0]
-    pil_images = [
-        Image.fromarray(camera_frames[i].cpu().numpy())
-        for i in range(num_cams)
-    ]
+    pil_images = []
+    for i in range(num_cams):
+        frame = camera_frames[i].cpu().numpy()
+        # AlPaGym camera frames are CHW [C, H, W]; PIL expects HWC [H, W, C].
+        if frame.ndim == 3 and frame.shape[0] == 3:
+            frame = np.transpose(frame, (1, 2, 0))
+        pil_images.append(Image.fromarray(frame))
 
     # Velocity from ego history
     if ego_history_xyz.shape[0] >= 2:
