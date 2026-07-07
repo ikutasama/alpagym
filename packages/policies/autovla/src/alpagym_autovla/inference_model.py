@@ -13,8 +13,8 @@ Key differences from Alpamayo R1:
 from __future__ import annotations
 
 import logging
-import math
-from typing import Any
+from dataclasses import asdict
+from typing import Any, Mapping
 
 import numpy as np
 import torch
@@ -24,6 +24,7 @@ from alpagym_host.config import SamplingParamsConfig
 from alpagym_runtime.inference.types import (
     BatchedModelInput,
     BatchedModelOutput,
+    ModelInput,
     ModelOutput,
 )
 from alpagym_runtime.replay import ActionSelection, PolicyReplayData, require_payload_keys
@@ -31,18 +32,21 @@ from alpagym_runtime.replay import ActionSelection, PolicyReplayData, require_pa
 logger = logging.getLogger(__name__)
 
 
-def heading_to_quaternion(heading: torch.Tensor) -> torch.Tensor:
-    """Convert heading angle (radians) to quaternion (w, x, y, z).
+def heading_to_rotation_matrix(heading: torch.Tensor) -> torch.Tensor:
+    """Convert yaw heading (radians) to SO(3) rotation matrices.
 
-    For 2D heading (rotation around z-axis only):
-      w = cos(heading/2), x = 0, y = 0, z = sin(heading/2)
+    AlPaGym selectors expect ``pred_rot`` shaped ``[..., 3, 3]``.  AutoVLA
+    predicts planar yaw only, so roll/pitch are identity.
     """
-    half = heading / 2.0
-    w = torch.cos(half)
-    z = torch.sin(half)
-    ones = torch.ones_like(w)
-    zeros = torch.zeros_like(w)
-    return torch.stack([w, zeros, zeros, z], dim=-1)  # (..., 4)
+    cos = torch.cos(heading)
+    sin = torch.sin(heading)
+    rot = torch.zeros(*heading.shape, 3, 3, dtype=torch.float32, device=heading.device)
+    rot[..., 0, 0] = cos
+    rot[..., 0, 1] = -sin
+    rot[..., 1, 0] = sin
+    rot[..., 1, 1] = cos
+    rot[..., 2, 2] = 1.0
+    return rot
 
 
 class AutoVLAInferenceModel:
@@ -108,25 +112,31 @@ class AutoVLAInferenceModel:
         all_pred_xyz = []
         all_pred_rot = []
         all_logprobs = []
+        all_action_token_ids = []
 
         for batch_idx in range(batch_size):
-            pred_xyz, pred_rot, logprob = self._infer_single(
+            pred_xyz, pred_rot, logprob, action_token_ids = self._infer_single(
                 model_input, batch_idx, sampling, return_trace_for_rl
             )
             all_pred_xyz.append(pred_xyz)
             all_pred_rot.append(pred_rot)
             if logprob is not None:
                 all_logprobs.append(logprob)
+            if action_token_ids is not None:
+                all_action_token_ids.append(action_token_ids)
 
-        pred_xyz = torch.stack(all_pred_xyz, dim=0)  # [B, T, 3]
-        pred_rot = torch.stack(all_pred_rot, dim=0)  # [B, T, 4]
-        logprob = torch.stack(all_logprobs, dim=0) if all_logprobs else None  # [B]
+        pred_xyz = torch.stack(all_pred_xyz, dim=0)  # [B, S, K, T, 3]
+        pred_rot = torch.stack(all_pred_rot, dim=0)  # [B, S, K, T, 3, 3]
+        logprob = torch.stack(all_logprobs, dim=0) if all_logprobs else None  # [B, S, K]
+        extra: dict[str, Any] = {}
+        if all_action_token_ids:
+            extra["action_token_ids"] = torch.stack(all_action_token_ids, dim=0)  # [B, S, K, T]
 
         return BatchedModelOutput(
             pred_xyz=pred_xyz,
             pred_rot=pred_rot,
             logprob=logprob,
-            extra={},
+            extra=extra,
         )
 
     def _infer_single(
@@ -135,8 +145,21 @@ class AutoVLAInferenceModel:
         batch_idx: int,
         sampling: SamplingParamsConfig,
         return_trace_for_rl: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        """Process one batch row: build prompt, generate, decode trajectory."""
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        """Process one batch row: build prompt, generate, decode trajectory.
+
+        Returns AlPaGym candidate axes for one batch row:
+          pred_xyz ``[num_traj_sets, num_traj_samples, T, 3]``
+          pred_rot ``[num_traj_sets, num_traj_samples, T, 3, 3]``
+          logprob ``[num_traj_sets, num_traj_samples]`` when requested
+        """
+        if sampling.num_traj_sets != 1 or sampling.num_traj_samples != 1:
+            raise ValueError(
+                "AutoVLA adapter currently supports exactly one candidate per tick; "
+                f"got num_traj_sets={sampling.num_traj_sets}, "
+                f"num_traj_samples={sampling.num_traj_samples}."
+            )
+
         # 1. Convert camera frames to PIL images and build Qwen processor inputs
         model_inputs = self._build_qwen_inputs(model_input, batch_idx)
 
@@ -163,8 +186,12 @@ class AutoVLAInferenceModel:
         if len(action_tokens) > self._num_poses:
             action_tokens = action_tokens[:self._num_poses]
         elif len(action_tokens) < self._num_poses:
-            pad = torch.zeros(self._num_poses - len(action_tokens),
-                              dtype=action_tokens.dtype, device=action_tokens.device)
+            pad = torch.full(
+                (self._num_poses - len(action_tokens),),
+                self._action_start_id,
+                dtype=action_tokens.dtype,
+                device=action_tokens.device,
+            )
             action_tokens = torch.cat([action_tokens, pad])
 
         # 4. Decode tokens to trajectory (x, y, heading)
@@ -180,17 +207,23 @@ class AutoVLAInferenceModel:
         pred_xyz[:, 1] = traj[:, 1]  # y
         pred_xyz[:, 2] = 0.0         # z = 0 (2D planning)
 
-        # pred_rot: [T, 4] — quaternion (w, x, y, z)
-        pred_rot = heading_to_quaternion(traj[:, 2])  # [T, 4]
+        # pred_rot: [T, 3, 3] — yaw-only rotation matrix
+        pred_rot = heading_to_rotation_matrix(traj[:, 2])
+
+        # Add AlPaGym candidate axes: [S=1, K=1, T, ...]
+        pred_xyz = pred_xyz.unsqueeze(0).unsqueeze(0)
+        pred_rot = pred_rot.unsqueeze(0).unsqueeze(0)
 
         # 6. Compute logprob if needed for RL
         logprob = None
+        action_token_ids_out = None
         if return_trace_for_rl:
             logprob = self._compute_logprob(
                 model_inputs, prompt_completion_ids, prompt_length
-            )
+            ).reshape(1, 1)
+            action_token_ids_out = action_tokens.reshape(1, 1, -1).to(torch.int64).cpu()
 
-        return pred_xyz, pred_rot, logprob
+        return pred_xyz, pred_rot, logprob, action_token_ids_out
 
     def _build_qwen_inputs(
         self,
@@ -267,12 +300,28 @@ class AutoVLAInferenceModel:
             messages, tokenize=False, add_generation_prompt=True, add_vision_id=True
         )
 
-        inputs = self._processor(
-            text=[text],
-            images=pil_images,
-            padding=True,
-            return_tensors="pt",
-        )
+        processor_kwargs: dict[str, Any]
+        try:
+            from qwen_vl_utils import process_vision_info
+
+            image_inputs, video_inputs = process_vision_info(messages)
+            processor_kwargs = {
+                "text": [text],
+                "images": image_inputs,
+                "videos": video_inputs,
+                "padding": True,
+                "return_tensors": "pt",
+            }
+        except Exception as exc:  # pragma: no cover - fallback for lightweight smoke envs
+            logger.warning("Falling back to image-only Qwen processor path: %s", exc)
+            processor_kwargs = {
+                "text": [text],
+                "images": pil_images,
+                "padding": True,
+                "return_tensors": "pt",
+            }
+
+        inputs = self._processor(**processor_kwargs)
 
         # Move to device
         return {k: v.to(self._device) if isinstance(v, torch.Tensor) else v
@@ -402,12 +451,18 @@ class AutoVLAInferenceModel:
         sum of per-token log-probs from the model's logits.
         """
         with torch.no_grad():
-            # Forward pass to get logits
+            # Forward pass to get logits.  Reuse all processor-produced vision
+            # tensors (image/video pixel values + grid metadata) and replace only
+            # the token sequence with the full prompt+completion IDs.
+            forward_kwargs = {
+                key: value
+                for key, value in model_inputs.items()
+                if key not in ("input_ids", "attention_mask")
+            }
             outputs = self._vlm(
                 input_ids=prompt_completion_ids,
                 attention_mask=torch.ones_like(prompt_completion_ids),
-                pixel_values_videos=model_inputs.get("pixel_values_videos"),
-                video_grid_thw=model_inputs.get("video_grid_thw"),
+                **forward_kwargs,
             )
             logits = outputs.logits  # (1, L, V)
 
@@ -425,35 +480,83 @@ class AutoVLAInferenceModel:
 
         return logprob.squeeze(0)  # scalar
 
+    def build_policy_replay_data(
+        self,
+        model_input: ModelInput,
+        model_output: ModelOutput,
+        action_selection: ActionSelection,
+    ) -> PolicyReplayData:
+        """Pack selected-only AutoVLA replay data.
+
+        Persist the raw AlPaGym input plus the selected discrete action-token
+        sequence so trainer-side scoring can reconstruct the exact rollout action.
+        """
+        if model_output.logprob is None:
+            raise ValueError("AutoVLA replay requires rollout logprob")
+        if "action_token_ids" not in model_output.extra:
+            raise ValueError("AutoVLA replay requires action_token_ids in model_output.extra")
+        old_logprob = model_output.logprob[action_selection.set_ix, action_selection.sample_ix]
+        selected_action_token_ids = model_output.extra["action_token_ids"][
+            action_selection.set_ix, action_selection.sample_ix
+        ]
+        return PolicyReplayData(
+            replay_schema_version=1,
+            payload_schema="autovla.action_tokens.v1",
+            payload_schema_version=1,
+            model_family="autovla",
+            action_selection=action_selection,
+            old_logprob=torch.as_tensor(old_logprob, dtype=torch.float32).reshape(()),
+            payload={
+                "model_input": asdict(model_input),
+                "action_token_ids": torch.as_tensor(selected_action_token_ids, dtype=torch.int64),
+            },
+        )
+
     @staticmethod
     def build_trainer_model_inputs(
-        replay_data: Any,
+        replay_data: PolicyReplayData,
         action_start_id: int = 151665,
-    ) -> tuple[dict[str, Any], Any]:
+    ) -> tuple[dict[str, Any], torch.Tensor]:
         """Build trainer-side model inputs from replay payload.
 
-        For AutoVLA, the trainer needs:
-        - input_ids (prompt + completion)
-        - attention_mask
-        - pixel_values_videos / video_grid_thw
-        - The old logprob for GRPO ratio computation
+        This preserves the raw AlPaGym model input plus the selected action-token
+        IDs.  The policy-side model wrapper can then rebuild Qwen inputs and
+        score exactly the action sequence sampled during rollout.
         """
-        payload = replay_data if isinstance(replay_data, dict) else replay_data.__dict__
-        require_payload_keys(payload, ["camera_frames", "ego_history_xyz", "ego_history_rot"])
-
-        # The trainer re-runs the forward pass to get new logprobs,
-        # so it needs the same inputs as rollout.
+        del action_start_id
+        if replay_data.payload_schema != "autovla.action_tokens.v1":
+            raise ValueError(
+                f"{replay_data.model_family} replay payload_schema "
+                f"{replay_data.payload_schema!r} != 'autovla.action_tokens.v1'"
+            )
+        if replay_data.payload_schema_version != 1:
+            raise ValueError(
+                f"{replay_data.model_family} replay payload_schema_version "
+                f"{replay_data.payload_schema_version} != 1"
+            )
+        payload = replay_data.payload
+        require_payload_keys(
+            replay_data.model_family,
+            payload,
+            ("model_input", "action_token_ids"),
+        )
+        model_input_payload = payload["model_input"]
+        if not isinstance(model_input_payload, Mapping):
+            raise TypeError(
+                "autovla replay model_input must be a mapping, "
+                f"got {type(model_input_payload).__name__}"
+            )
+        model_input = ModelInput.from_payload(model_input_payload)
         model_inputs = {
-            "camera_frames": torch.as_tensor(payload["camera_frames"], dtype=torch.uint8),
-            "ego_history_xyz": torch.as_tensor(payload["ego_history_xyz"], dtype=torch.float32),
-            "ego_history_rot": torch.as_tensor(payload["ego_history_rot"], dtype=torch.float32),
-            "camera_indices": torch.as_tensor(payload.get("camera_indices", torch.zeros(1)), dtype=torch.int64),
-            "relative_timestamps": torch.as_tensor(payload.get("relative_timestamps", torch.zeros(1)), dtype=torch.int64),
-            "route_xy": torch.as_tensor(payload.get("route_xy", torch.zeros(1, 2)), dtype=torch.float32),
+            "camera_frames": model_input.camera_frames,
+            "ego_history_xyz": model_input.ego_history_xyz,
+            "ego_history_rot": model_input.ego_history_rot,
+            "camera_indices": model_input.camera_indices,
+            "relative_timestamps": model_input.relative_timestamps,
+            "route_xy": model_input.route_xy,
+            "action_token_ids": torch.as_tensor(payload["action_token_ids"], dtype=torch.int64),
         }
-
-        old_logprob = payload.get("logprob", None)
-        if old_logprob is not None:
-            old_logprob = torch.as_tensor(old_logprob, dtype=torch.float32)
-
+        if replay_data.old_logprob is None:
+            raise ValueError("autovla replay requires old_logprob")
+        old_logprob = torch.as_tensor(replay_data.old_logprob, dtype=torch.float32).reshape(())
         return model_inputs, old_logprob
