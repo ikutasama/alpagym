@@ -114,7 +114,7 @@ def load_inference_model(
 
     bc = model_config.bundle_config
 
-    return AutoVLAInferenceModel(
+    model = AutoVLAInferenceModel(
         vlm=vlm,
         processor=processor,
         codebook=codebook_data,
@@ -124,6 +124,29 @@ def load_inference_model(
         device=device,
         use_cot=bc.get("use_cot", False),
     )
+
+    # Load SFT checkpoint (.ckpt) if provided.  AutoVLA releases a
+    # PyTorch-Lightning checkpoint whose state_dict keys are prefixed
+    # 'autovla.vlm.' — strip both to match Qwen2_5_VLForConditionalGeneration.
+    ckpt_path = bc.get("checkpoint_path")
+    if ckpt_path:
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        raw = ckpt["state_dict"]
+        new_state: dict[str, torch.Tensor] = {}
+        for k, v in raw.items():
+            if k.startswith("autovla."):
+                k = k[len("autovla."):]
+            if k.startswith("vlm."):
+                k = k[len("vlm."):]
+            new_state[k] = v
+        missing, unexpected = model._vlm.load_state_dict(new_state, strict=False)
+        logger.info(
+            "Loaded AutoVLA SFT checkpoint from %s "
+            "(missing=%d, unexpected=%d)",
+            ckpt_path, len(missing), len(unexpected),
+        )
+
+    return model
 
 
 def build_model_inputs(
