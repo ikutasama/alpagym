@@ -28,6 +28,11 @@ def install_autovla_runtime_bridge() -> None:
     ``visual.*`` keys that the default mapper skips).  If the built-in is
     already registered we fall back to it — sufficient for single-GPU
     smoke tests where no cross-process weight sync is needed.
+
+    We also patch ``AlpagymGRPOTrainer._forward_with_reference`` so the
+    trainer can handle AutoVLA's raw replay inputs (camera_frames,
+    action_token_ids) by rebuilding Qwen2.5-VL processor inputs and
+    computing per-token log_probs — the same pattern Alpamayo R1 uses.
     """
     from cosmos_rl.policy.model.base import ModelRegistry
     from alpagym_autovla.cosmos_bridge import Qwen2_5_VLBaseModel, Qwen2_5_VLWeightMapper
@@ -43,11 +48,35 @@ def install_autovla_runtime_bridge() -> None:
             "using built-in model."
         )
 
+    # Patch trainer forward to handle AutoVLA raw inputs
+    from alpagym_autovla.autovla_trainer_forward import patch_trainer_forward
+    patch_trainer_forward()
+
 
 def setup_tokenizer(config: Any) -> Any | None:
-    """Install the runtime bridge before super-init.  No tokenizer override."""
-    del config
+    """Install the runtime bridge and store model config for trainer forward."""
     install_autovla_runtime_bridge()
+
+    # Store model path and bundle config for the patched training forward
+    from alpagym_autovla.autovla_trainer_forward import set_trainer_config
+
+    model_config = config.policy.model
+    bc = model_config.bundle_config
+    model_path = model_config.path
+
+    # Resolve vlm subdir (same logic as load_inference_model)
+    from pathlib import Path
+    bundle_dir = Path(model_path)
+    vlm_path = bundle_dir / "vlm"
+    if not vlm_path.is_dir():
+        vlm_path = bundle_dir
+
+    set_trainer_config(
+        model_path=str(vlm_path),
+        action_start_id=bc.get("action_start_id", 151665),
+        num_poses=bc.get("trajectory", {}).get("num_poses", 10),
+    )
+
     return None
 
 
@@ -56,6 +85,22 @@ def build_data_packer(run_config: Any, cosmos_role: str | None) -> Any:
     from alpagym_runtime.cosmos.packer import build_alpagym_data_packer
 
     install_autovla_runtime_bridge()
+
+    # Ensure trainer config is set (in case setup_tokenizer wasn't called yet)
+    from alpagym_autovla.autovla_trainer_forward import set_trainer_config, _trainer_config
+    if not _trainer_config:
+        from pathlib import Path
+        bc = run_config.policy.model.bundle_config
+        bundle_dir = Path(run_config.policy.model.path)
+        vlm_path = bundle_dir / "vlm"
+        if not vlm_path.is_dir():
+            vlm_path = bundle_dir
+        set_trainer_config(
+            model_path=str(vlm_path),
+            action_start_id=bc.get("action_start_id", 151665),
+            num_poses=bc.get("trajectory", {}).get("num_poses", 10),
+        )
+
     return build_alpagym_data_packer(
         run_config=run_config,
         cosmos_role=cosmos_role,
