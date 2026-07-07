@@ -54,29 +54,13 @@ def install_autovla_runtime_bridge() -> None:
 
 
 def setup_tokenizer(config: Any) -> Any | None:
-    """Install the runtime bridge and store model config for trainer forward."""
+    """Install the runtime bridge before super-init.  No tokenizer override.
+
+    The AlpaGym RunConfig is not available here (config is the Cosmos-RL
+    Config).  Trainer config (model path, action_start_id) is set later
+    in ``build_data_packer`` which receives the full RunConfig.
+    """
     install_autovla_runtime_bridge()
-
-    # Store model path and bundle config for the patched training forward
-    from alpagym_autovla.autovla_trainer_forward import set_trainer_config
-
-    model_config = config.policy.model
-    bc = model_config.bundle_config
-    model_path = model_config.path
-
-    # Resolve vlm subdir (same logic as load_inference_model)
-    from pathlib import Path
-    bundle_dir = Path(model_path)
-    vlm_path = bundle_dir / "vlm"
-    if not vlm_path.is_dir():
-        vlm_path = bundle_dir
-
-    set_trainer_config(
-        model_path=str(vlm_path),
-        action_start_id=bc.get("action_start_id", 151665),
-        num_poses=bc.get("trajectory", {}).get("num_poses", 10),
-    )
-
     return None
 
 
