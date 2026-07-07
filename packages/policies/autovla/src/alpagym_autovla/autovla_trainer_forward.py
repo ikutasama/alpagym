@@ -243,6 +243,15 @@ def autovla_training_forward(
     route_xy = model_inputs.get("route_xy")
     action_token_ids = model_inputs.get("action_token_ids")
 
+    logger.info(
+        "AutoVLA training forward shapes: camera_frames=%s dtype=%s, "
+        "ego_history_xyz=%s, route_xy=%s, action_token_ids=%s",
+        tuple(camera_frames.shape), camera_frames.dtype,
+        tuple(ego_history_xyz.shape),
+        tuple(route_xy.shape) if route_xy is not None else None,
+        tuple(action_token_ids.shape) if action_token_ids is not None else None,
+    )
+
     # Ensure batch dim
     if camera_frames.dim() == 4:
         camera_frames = camera_frames.unsqueeze(0)
