@@ -37,12 +37,31 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 
 # Install 3-camera config (wide+left+right, no tele) into the AlPaSim wizard
 # configs directory so Hydra can resolve +cameras=3cam_1080.
-ALPASIM_ROOT="${ALPASIM_ROOT:-${ALPAGYM_ROOT:-$HOME/alpagym}/../alpasim}"
+# AlPaSim may run from a local checkout (ALPASIM_ROOT) or from a content-
+# addressed cache at ~/.cache/alpagym/alpasim/<hash>/ — copy to both if they exist.
 CAM_SRC="${ALPAGYM_ROOT:-$HOME/alpagym}/scripts/cameras/3cam_1080.yaml"
-CAM_DST="${ALPASIM_ROOT}/src/wizard/configs/cameras/3cam_1080.yaml"
-if [ -f "${CAM_SRC}" ] && [ -d "$(dirname "${CAM_DST}")" ]; then
-  cp -f "${CAM_SRC}" "${CAM_DST}"
+CAMERA_DIR="src/wizard/configs/cameras"
+
+# 1) Explicit ALPASIM_ROOT (local checkout)
+COPY_TARGETS=()
+if [ -n "${ALPASIM_ROOT:-}" ] && [ -d "${ALPASIM_ROOT}/${CAMERA_DIR}" ]; then
+  COPY_TARGETS+=("${ALPASIM_ROOT}/${CAMERA_DIR}/3cam_1080.yaml")
 fi
+
+# 2) Cached checkout(s) under ~/.cache/alpagym/alpasim/*/  (may be multiple hashes)
+CACHE_BASE="${XDG_CACHE_HOME:-$HOME/.cache}/alpagym/alpasim"
+for d in "${CACHE_BASE}"/*/; do
+  if [ -d "${d}${CAMERA_DIR}" ]; then
+    COPY_TARGETS+=("${d}${CAMERA_DIR}/3cam_1080.yaml")
+  fi
+done
+
+for dst in "${COPY_TARGETS[@]}"; do
+  if [ -f "${CAM_SRC}" ]; then
+    cp -f "${CAM_SRC}" "${dst}"
+    echo "Installed 3cam_1080.yaml -> ${dst}"
+  fi
+done
 
 # HF token: read from env or local file, never hardcoded in this repo.
 if [ -z "${HF_TOKEN:-}" ]; then
