@@ -35,6 +35,15 @@ export AUTOVLA_REPO_PATH="${AUTOVLA_REPO_PATH:-/mnt/mnt_m62/10_personal/z5990049
 # disjoint segments.
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
+# Install 3-camera config (wide+left+right, no tele) into the AlPaSim wizard
+# configs directory so Hydra can resolve +cameras=3cam_1080.
+ALPASIM_ROOT="${ALPASIM_ROOT:-${ALPAGYM_ROOT:-$HOME/alpagym}/../alpasim}"
+CAM_SRC="${ALPAGYM_ROOT:-$HOME/alpagym}/scripts/cameras/3cam_1080.yaml"
+CAM_DST="${ALPASIM_ROOT}/src/wizard/configs/cameras/3cam_1080.yaml"
+if [ -f "${CAM_SRC}" ] && [ -d "$(dirname "${CAM_DST}")" ]; then
+  cp -f "${CAM_SRC}" "${CAM_DST}"
+fi
+
 # HF token: read from env or local file, never hardcoded in this repo.
 if [ -z "${HF_TOKEN:-}" ]; then
   if [ -f "$HOME/.cache/huggingface/token" ]; then
@@ -48,7 +57,7 @@ EXPERIMENT="${EXPERIMENT:-autovla_local_smoke}"
 REWARD="${REWARD:-progress_safety}"
 MODEL_PATH="${MODEL_PATH:-/mnt/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Qwen/Qwen2.5-VL-3B-Instruct}"
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-/mnt/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Zewei-Zhou/AutoVLA/AutoVLA_PDMS_89.ckpt}"
-ALPASIM_EXTRA_OVERRIDES="${ALPASIM_EXTRA_OVERRIDES:-+cameras=4cam_1080 runtime.simulation_config.pose_reporting_interval_us=100000 scenes.local_usdz_dir=/mnt/mnt_m181/z59900495/workspace/DownloadTool-master/nvidia/PhysicalAI-Autonomous-Vehicles-NuRec}"
+ALPASIM_EXTRA_OVERRIDES="${ALPASIM_EXTRA_OVERRIDES:-+cameras=3cam_1080 runtime.simulation_config.pose_reporting_interval_us=100000 scenes.local_usdz_dir=/mnt/mnt_m181/z59900495/workspace/DownloadTool-master/nvidia/PhysicalAI-Autonomous-Vehicles-NuRec}"
 
 exec uv run --no-sync --all-packages python -m alpagym_host.cli \
   "experiment=${EXPERIMENT}" \
