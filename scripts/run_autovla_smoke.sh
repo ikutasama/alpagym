@@ -29,6 +29,12 @@ export CARGO_HTTP_CHECK_REVOKE="${CARGO_HTTP_CHECK_REVOKE:-false}"
 export CARGO_NET_GIT_FETCH_WITH_CLI="${CARGO_NET_GIT_FETCH_WITH_CLI:-true}"
 export AUTOVLA_REPO_PATH="${AUTOVLA_REPO_PATH:-/mnt/mnt_m62/10_personal/z59900495/workspace/AutoVLA}"
 
+# Reduce CUDA fragmentation: colocated mode shares the GPU between AlPaSim
+# renderer (~9GB) and the training process (~21GB).  expandable_segments lets
+# PyTorch reuse freed blocks across the allocator pool instead of reserving
+# disjoint segments.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
 # HF token: read from env or local file, never hardcoded in this repo.
 if [ -z "${HF_TOKEN:-}" ]; then
   if [ -f "$HOME/.cache/huggingface/token" ]; then
