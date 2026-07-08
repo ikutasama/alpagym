@@ -419,6 +419,11 @@ class AlpagymGRPOTrainer(_grpo_trainer.GRPOTrainer):
         loss = policy_loss + kl_loss
 
         self.optimizers.zero_grad()
+        # Free fragmented CUDA memory before backward. In colocated mode the
+        # renderer (~9 GiB) and trainer (~21 GiB) share one GPU, leaving almost
+        # no headroom. empty_cache() returns reserved-but-unallocated blocks to
+        # CUDA so the backward pass can allocate fresh contiguous blocks.
+        torch.cuda.empty_cache()
         loss.backward()
         grad_norm = self.all_reduce_states(inter_policy_nccl)
 
