@@ -22,8 +22,8 @@ getting a model bundle, and launching a run. For the system overview, see the
 ## Hardware and Disk Budget
 
 To comfortably run AlpaGym locally with the AR1.5 policy, we recommend two (with smaller
-models, colocated on one GPU is also feasible)CUDA GPU with at least 40 GBof VRAM
-(e.g. A6000) and ~100–150 GB of free diskfor the `uv` environment,
+models, colocated on one GPU is also feasible) CUDA GPU with at least 40 GB of VRAM
+(e.g. A6000) and ~100–150 GB of free disk for the `uv` environment,
 container images, and model weights (Alpamayo-R1-10B ~21 GB), plus ~1.5 GB for
 each NuRec scene you download (the full `public_2601` NuRec suite is ~1.5 TB).
 
@@ -41,6 +41,8 @@ that works, AlpaGym can manage its own AlpaSim checkout.
 Install the host-side tools and system dependencies:
 
 ```bash
+cd <repo_checkout_root>
+
 # UV for Python environment and package management.
 uv self update
 
@@ -135,10 +137,9 @@ checkpoint format:
 uv run --no-sync python -c "\
 from huggingface_hub import snapshot_download; \
 print(snapshot_download('nvidia/Alpamayo-1.5-10B', \
-local_dir='./tmp/checkpoints/Alpamayo-1.5-10B'))\
-"
+local_dir='./tmp/checkpoints/Alpamayo-1.5-10B'))"
 
-uv run --no-sync --package alpagym-runtime python \
+uv run --no-sync --package alpagym-alpamayo-r1 python \
   packages/policies/alpamayo_r1/scripts/convert_release_to_alpagym_checkpoint.py \
   --input ./tmp/checkpoints/Alpamayo-1.5-10B \
   --output ./tmp/checkpoints/alpamayo-1.5-10B_alpagym_ckpt \
@@ -150,7 +151,9 @@ uv run --no-sync --package alpagym-runtime python \
 The policy and rollout run on separate GPUs and exchange weights over NCCL
 point-to-point send/recv. On some hosts the direct GPU-to-GPU transport (NVLink
 or PCIe P2P) is advertised by NCCL but then stalls, which appears as a hang
-during the first weight sync (`[Rollout] Starting to execute ... weight sync receives ...`) with both GPUs stuck at 100%.
+during the first weight sync
+(`[Rollout] Starting to execute ... weight sync receives ...`)
+with both GPUs stuck at 100%.
 
 Confirm your topology works before launching a full run:
 
@@ -183,7 +186,7 @@ uv run --no-sync --all-packages python -m alpagym_host.cli \
   reward=progress_safety
 ```
 
-Outputs are written under `outputs/` and run artifacts under `tmp/alpagym-runs/`.
+Outputs are written to `./tmp/alpagym-runs/`. Hydra output is written to `./outputs/`.
 
 In the future, we are planning to release a distillation script that can
 convert the 10B Alpamyo model to a smaller checkpoint (e.g. 2B) that can run on a single

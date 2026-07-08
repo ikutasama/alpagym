@@ -9,8 +9,8 @@ import torch
 from alpagym_host.config import RunConfig
 
 from alpagym_runtime.inference.inference_engine import InferenceEngine
-from alpagym_runtime.policies.alpamayo.determinism import set_deterministic
 from alpagym_runtime.policies.alpamayo.policy import AlpamayoPolicy
+from alpagym_runtime.policies.determinism import set_deterministic
 from alpagym_runtime.policies.registry import get_policy_bundle
 from alpagym_runtime.types import Policy, RolloutCalibration
 

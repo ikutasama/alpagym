@@ -27,6 +27,25 @@ def test_file_topology_registry_lists_and_assigns_runtime_endpoints(tmp_path: Pa
     assert registry.acquire_alpasim_runtime(driver_id="driver-a").host == "node-a"
 
 
+def test_reset_alpasim_topology_clears_runtimes_and_assignments(tmp_path: Path) -> None:
+    """Reset lets a requeued attempt republish endpoints and re-balance from zero."""
+    registry = FileTopologyRegistry(tmp_path / "topology")
+    registry.publish_alpasim_runtime(TopologyEndpoint("alpasim-runtime-0", "node-a", 30051, 100))
+    registry.acquire_alpasim_runtime(driver_id="driver-pid-1")
+
+    # Without a reset, the exclusive-create publish raises on the stale file.
+    with pytest.raises(FileExistsError):
+        registry.publish_alpasim_runtime(TopologyEndpoint("alpasim-runtime-0", "node-b", 30051, 5))
+
+    registry.reset_alpasim_topology()
+    registry.publish_alpasim_runtime(TopologyEndpoint("alpasim-runtime-0", "node-b", 30051, 5))
+
+    endpoints = registry.list_alpasim_runtimes()
+    assert [(ep.id, ep.host) for ep in endpoints] == [("alpasim-runtime-0", "node-b")]
+    # Prior-attempt assignments are gone, so balancing starts from zero.
+    assert not list((tmp_path / "topology" / "alpasim_assignments").glob("*.yaml"))
+
+
 def test_nccl_master_round_trips(tmp_path: Path) -> None:
     """The published NCCL master endpoint reads back as (host, port)."""
     registry = FileTopologyRegistry(tmp_path / "topology")

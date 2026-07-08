@@ -101,6 +101,7 @@ class _FakeInferenceModel:
         """Build a minimal replay envelope for policy tests."""
         if model_output.logprob is None:
             raise ValueError("test replay requires logprob")
+        selected_xyz = model_output.pred_xyz[action_selection.set_ix, action_selection.sample_ix]
         return PolicyReplayData(
             replay_schema_version=1,
             payload_schema="alpamayo_r1.trajectory.v1",
@@ -114,20 +115,8 @@ class _FakeInferenceModel:
             ),
             payload={
                 "model_input": asdict(model_input),
-                "tokenized_data": {
-                    "input_ids": torch.tensor([1, 2, 3], dtype=torch.int64),
-                    "attention_mask": torch.ones(3, dtype=torch.bool),
-                    "position_ids": None,
-                    "attention_mask_4d": None,
-                    "labels_mask": torch.tensor([False, True, True]),
-                },
-                "ego_future_xyz": model_output.pred_xyz[
-                    action_selection.set_ix, action_selection.sample_ix
-                ].unsqueeze(0),
-                "ego_future_rot": model_output.pred_rot[
-                    action_selection.set_ix, action_selection.sample_ix
-                ].unsqueeze(0),
-                "token_logprob_count": torch.tensor(2, dtype=torch.int64),
+                "samples_list": selected_xyz,
+                "timesteps": torch.arange(selected_xyz.shape[0] + 1, dtype=torch.float32),
             },
         )
 
@@ -351,17 +340,17 @@ def test_alpamayo_policy_identity_selector_packs_full_output() -> None:
     assert result.replay_data is not None
     assert isinstance(result.replay_data, PolicyReplayData)
     assert result.replay_data.model_family == "alpamayo_r1"
+    assert result.replay_data.payload_schema == "alpamayo_r1.trajectory.v1"
     assert result.replay_data.action_selection == ActionSelection(
         set_ix=0,
         sample_ix=0,
     )
     payload = result.replay_data.payload
-    assert torch.equal(payload["ego_future_xyz"], pred_xyz[0, 0].unsqueeze(0))
-    assert torch.equal(payload["ego_future_rot"], pred_rot[0, 0].unsqueeze(0))
+    assert torch.equal(payload["samples_list"], pred_xyz[0, 0])
+    assert torch.equal(payload["timesteps"], torch.arange(horizon + 1, dtype=torch.float32))
     assert "old_logprob" not in payload
     assert result.replay_data.old_logprob is not None
     assert torch.allclose(result.replay_data.old_logprob, expected_per_traj_logprob[0, 0])
-    assert payload["tokenized_data"]["input_ids"].dtype == torch.int64
     assert payload["model_input"]["ego_history_xyz"].shape == (1, 2, 3)
 
     assert result.all_pred_xyz is not None

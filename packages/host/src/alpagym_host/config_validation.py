@@ -46,9 +46,22 @@ def validate_run_config(
     _validate_transport_config(config)
     _validate_policy_model_path(config)
     _validate_cosmos_mode(config)
+    _validate_nccl_test_model(config)
     execution_backend = ExecutionBackend(config.execution.backend)
     if requested_command == "submit" and not execution_backend.is_slurm_run:
         raise ValueError("command=submit requires execution.backend to be a Slurm backend")
+    if config.execution.slurm.autoresume:
+        # Autoresume is the Slurm SIGUSR1 -> requeue path; on a non-Slurm backend it
+        # would be silently ignored, and without checkpoints a requeue restarts from
+        # scratch every time.
+        if not execution_backend.is_slurm_run:
+            raise ValueError(
+                "execution.slurm.autoresume requires execution.backend to be a Slurm backend"
+            )
+        if not config.cosmos.train.ckpt.enable_checkpoint:
+            raise ValueError(
+                "execution.slurm.autoresume requires cosmos.train.ckpt.enable_checkpoint=true"
+            )
     if execution_backend is ExecutionBackend.slurm:
         if config.alpasim.repo_path is None and config.alpasim.checkout_cache_dir is None:
             raise ValueError(
@@ -171,6 +184,42 @@ def _validate_policy_model_path(config: RunConfig) -> None:
             "policy.model.path HF bundle directory must contain config.json and a "
             f"supported checkpoint weight file or shard index such as model*.safetensors, "
             f"pytorch_model*.bin, or model.safetensors.index.json: {model_path}"
+        )
+
+
+def _validate_nccl_test_model(config: RunConfig) -> None:
+    """Require the synthetic test model and its rollout backend to be used together.
+
+    ``model.kind=nccl_test_model`` is the NCCL transport stress check's tiny model and
+    ``cosmos.rollout.backend=alpagym_nccl_rollout`` fabricates its synthetic episodes;
+    each only works with the other (``alpagym_rollout`` would drive AlpaSim against the
+    tiny model, and the synthetic backend has no real policy to roll out). So require the
+    pairing in both directions; require ``transport=nccl`` too, since the whole point of
+    the check is to exercise the rollout-to-policy NCCL path and any other transport makes
+    it a silent no-op; and — since the synthetic backend reads ``dataset.scene_ids``
+    directly to fabricate one episode per scene — require those too. This turns a
+    misconfiguration into a clear preflight error rather than a confusing rollout-time
+    failure or a green run that never touched NCCL.
+    """
+    is_nccl_kind = config.policy.model.kind == "nccl_test_model"
+    is_nccl_backend = config.cosmos.rollout.backend == "alpagym_nccl_rollout"
+    if is_nccl_kind != is_nccl_backend:
+        raise ValueError(
+            "policy.model.kind=nccl_test_model and "
+            "cosmos.rollout.backend=alpagym_nccl_rollout must be set together; got "
+            f"kind={config.policy.model.kind!r}, backend={config.cosmos.rollout.backend!r}."
+        )
+    if is_nccl_kind and config.transport.kind != TransportKind.nccl:
+        raise ValueError(
+            "policy.model.kind=nccl_test_model requires transport=nccl; the stress check "
+            "exists to exercise the rollout-to-policy NCCL path, so any other transport "
+            f"makes it a no-op. Got transport.kind={config.transport.kind.value!r}."
+        )
+    if is_nccl_kind and not config.dataset.scene_ids:
+        raise ValueError(
+            "policy.model.kind=nccl_test_model requires dataset.scene_ids (the synthetic "
+            "rollout backend fabricates one episode per scene id); got "
+            f"dataset.scene_ids={config.dataset.scene_ids!r}."
         )
 
 
@@ -375,7 +424,7 @@ def _validate_shared_cosmos_2_3_shape(config: RunConfig) -> None:
         return
 
     expected: list[tuple[str, object, object]] = [
-        ("transport", config.transport.kind, TransportKind.disk),
+        ("transport", config.transport.kind, TransportKind.nccl),
         ("cosmos.launch.policy_replicas", config.cosmos.launch.policy_replicas, 4),
         ("cosmos.launch.rollout_replicas", config.cosmos.launch.rollout_replicas, 12),
         ("cosmos.rollout.batch_size", config.cosmos.rollout.batch_size, 2),

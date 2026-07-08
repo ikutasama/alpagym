@@ -130,6 +130,20 @@ class FileTopologyRegistry:
         """
         (self._registry_dir / "nccl_master.yaml").unlink(missing_ok=True)
 
+    def reset_alpasim_topology(self) -> None:
+        """Drop AlpaSim runtime endpoints and driver assignments from a prior attempt.
+
+        A Slurm requeue reuses the run directory. ``publish_alpasim_runtime``
+        opens with ``"x"`` and the driver balancer in ``acquire_alpasim_runtime``
+        counts ``alpasim_assignments/*.yaml``, so a previous attempt's runtimes
+        would block republish and its assignments would skew balancing toward
+        runtimes for drivers that no longer exist. Clearing both lets each
+        requeued attempt rebuild the rendezvous for its own allocation.
+        """
+        for subdir in ("alpasim_runtimes", "alpasim_assignments"):
+            for path in (self._registry_dir / subdir).glob("*.yaml"):
+                path.unlink()
+
     def list_alpasim_runtimes(self) -> list[TopologyEndpoint]:
         """Return all published AlpaSim RuntimeService endpoints."""
         alpasim_runtime_paths = sorted((self._registry_dir / "alpasim_runtimes").glob("*.yaml"))

@@ -3,7 +3,6 @@
 
 """Compose the conversation template for VLM models."""
 
-from collections.abc import Callable
 from typing import Any, Literal
 
 import numpy as np
@@ -771,24 +770,3 @@ def build_conversation(
 
     messages = [system_messages, user_messages, assistant_messages]
     return messages
-
-
-def _resolve_frame_label(cfg_get: Callable[..., Any]) -> FrameLabel:
-    """Resolve ``frame_label`` from a config, applying legacy back-compat.
-
-    Legacy fields ``include_frame_nums`` (bool) and ``use_dt_tokens`` (bool) are
-    mapped to the new ``frame_label`` enum:
-      * ``use_dt_tokens=True`` → ``"dt_token"`` (dt always wins, mirroring old
-        runtime behavior where dt overrode frame numbers).
-      * ``include_frame_nums=False`` → ``"none"``.
-      * ``include_frame_nums=True`` (default) → ``"frame_num"``.
-    Configs with the new ``frame_label`` field bypass the shim entirely.
-    """
-    explicit = cfg_get("frame_label", None)
-    if explicit is not None:
-        return explicit
-    if cfg_get("use_dt_tokens", False):
-        return "dt_token"
-    if not cfg_get("include_frame_nums", True):
-        return "none"
-    return "frame_num"

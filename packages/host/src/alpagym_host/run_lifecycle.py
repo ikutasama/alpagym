@@ -4,9 +4,11 @@
 import logging
 import os
 import shutil
+import signal
 import subprocess
 from contextlib import nullcontext
 from pathlib import Path
+from types import FrameType
 from typing import cast
 
 import grpc
@@ -81,57 +83,82 @@ def validate_local_process_config(execution_backend: ExecutionBackend) -> None:
         ) from exc
 
 
+class _AutoresumeTimeout(Exception):
+    """Raised from the pre-timeout SIGUSR1 handler to unwind the run for a requeue."""
+
+
+def _raise_autoresume_timeout(signum: int, frame: FrameType | None) -> None:
+    """Turn the pre-timeout SIGUSR1 into an exception so the run tears down cleanly."""
+    raise _AutoresumeTimeout
+
+
 def execute_run(config: RunConfig) -> None:
-    """Execute a run through the shared local and Slurm lifecycle."""
+    """Execute a run through the shared local and Slurm lifecycle.
+
+    With ``execution.slurm.autoresume``, a pre-timeout SIGUSR1 tears the run
+    down and requeues the job, which then resumes from the latest checkpoint.
+    """
     execution_backend = ExecutionBackend(config.execution.backend)
     validate_local_process_config(execution_backend)
-    scene_selector = (
-        f"{len(config.dataset.scene_ids)} scene ids"
-        if config.dataset.scene_ids is not None
-        else f"test suite {config.dataset.test_suite_id!r}"
-    )
-    logging.info(
-        "Starting AlpaGym run: backend=%s run_dir=%s dataset=%s policy_replicas=%d "
-        "rollout_replicas=%d",
-        execution_backend.value,
-        config.artifact_paths.run_dir,
-        scene_selector,
-        config.cosmos.launch.policy_replicas,
-        config.cosmos.launch.rollout_replicas,
-    )
-    if execution_backend.is_slurm_run:
-        hostnames = allocated_hostnames()
-        logging.info(
-            "Resolved Slurm allocation: hostnames=%s gpus_per_node=%d",
-            ",".join(hostnames),
-            config.execution.slurm.gpus_per_node,
-        )
-        topology = build_slurm_topology(
-            backend=execution_backend,
-            hostnames=hostnames,
-            gpus_per_node=config.execution.slurm.gpus_per_node,
-            topology=config.execution.slurm.topology,
-        )
-        logging.info(
-            "Preparing Slurm container image: image=%s cache_root=%s",
-            config.execution.slurm.container_image,
-            config.execution.slurm.container_cache_root,
-        )
-        container_image = prepare_container_image(
-            container_image=cast(str, config.execution.slurm.container_image),
-            container_cache_root=config.execution.slurm.container_cache_root,
-        )
-        logging.info("Using Slurm container image: %s", container_image)
-    else:
-        topology = build_local_topology()
-        container_image = None
-
-    _log_topology(topology)
-    alpasim_checkout_root = resolve_alpasim_checkout(config=config.alpasim)
-    registry = FileTopologyRegistry(config.artifact_paths.topology_registry_dir)
+    autoresume = execution_backend.is_slurm_run and config.execution.slurm.autoresume
+    # Install the handler before the try so a SIGUSR1 arriving during Slurm setup
+    # (allocation, image import) still unwinds into the requeue path below rather
+    # than killing the process with the default action.
+    if autoresume:
+        signal.signal(signal.SIGUSR1, _raise_autoresume_timeout)
     wizard_processes: list[subprocess.Popen[str]] = []
-    alpasim_hosts = topology.alpasim_host_plans
+    requeue_for_autoresume = False
     try:
+        scene_selector = (
+            f"{len(config.dataset.scene_ids)} scene ids"
+            if config.dataset.scene_ids is not None
+            else f"test suite {config.dataset.test_suite_id!r}"
+        )
+        logging.info(
+            "Starting AlpaGym run: backend=%s run_dir=%s dataset=%s policy_replicas=%d "
+            "rollout_replicas=%d",
+            execution_backend.value,
+            config.artifact_paths.run_dir,
+            scene_selector,
+            config.cosmos.launch.policy_replicas,
+            config.cosmos.launch.rollout_replicas,
+        )
+        if execution_backend.is_slurm_run:
+            hostnames = allocated_hostnames()
+            logging.info(
+                "Resolved Slurm allocation: hostnames=%s gpus_per_node=%d",
+                ",".join(hostnames),
+                config.execution.slurm.gpus_per_node,
+            )
+            topology = build_slurm_topology(
+                backend=execution_backend,
+                hostnames=hostnames,
+                gpus_per_node=config.execution.slurm.gpus_per_node,
+                topology=config.execution.slurm.topology,
+            )
+            logging.info(
+                "Preparing Slurm container image: image=%s cache_root=%s",
+                config.execution.slurm.container_image,
+                config.execution.slurm.container_cache_root,
+            )
+            container_image = prepare_container_image(
+                container_image=cast(str, config.execution.slurm.container_image),
+                container_cache_root=config.execution.slurm.container_cache_root,
+            )
+            logging.info("Using Slurm container image: %s", container_image)
+        else:
+            topology = build_local_topology()
+            container_image = None
+
+        _log_topology(topology)
+        alpasim_checkout_root = resolve_alpasim_checkout(config=config.alpasim)
+        registry = FileTopologyRegistry(config.artifact_paths.topology_registry_dir)
+        if autoresume:
+            # A requeue reuses the run dir; reset the prior attempt's AlpaSim
+            # rendezvous so this attempt rebuilds it. Normal launches keep the
+            # fail-fast exclusive publish on an accidentally reused run dir.
+            registry.reset_alpasim_topology()
+        alpasim_hosts = topology.alpasim_host_plans
         logging.info("Starting %d AlpaSim Wizard process(es)", len(alpasim_hosts))
         for runtime_index, host in enumerate(alpasim_hosts):
             wizard_processes.append(
@@ -233,11 +260,19 @@ def execute_run(config: RunConfig) -> None:
                 text=True,
             )
         logging.info("Cosmos launcher completed")
+    except _AutoresumeTimeout:
+        requeue_for_autoresume = True
+        logging.info("Pre-timeout SIGUSR1 received; tearing down to requeue the Slurm job")
     finally:
         if wizard_processes:
             logging.info("Stopping %d AlpaSim Wizard process(es)", len(wizard_processes))
         for process in wizard_processes:
             ensure_process_terminated(process)
+
+    if requeue_for_autoresume:
+        job_id = os.environ["SLURM_JOB_ID"]
+        logging.info("Requeuing Slurm job %s for autoresume", job_id)
+        subprocess.run(["scontrol", "requeue", job_id], check=True, text=True)
 
 
 def _start_wizard_process(
@@ -387,25 +422,31 @@ def _build_cosmos_launcher_command(
     command = ["uv", "run"]
     if no_sync:
         command.append("--no-sync")
+    else:
+        command.append("--all-packages")
     launcher_args = [
         "--project",
         str(project_root),
-        "--package",
-        "alpagym-runtime",
-        "python",
-        "-m",
-        "cosmos_rl.launcher.launch_all",
-        "--config",
-        str(config.artifact_paths.cosmos_config_path),
-        "--policy",
-        str(config.cosmos.launch.policy_replicas),
-        "--rollout",
-        str(config.cosmos.launch.rollout_replicas),
-        "--num-workers",
-        str(worker_count),
-        "--worker-idx",
-        str(worker_index),
     ]
+    if no_sync:
+        launcher_args.extend(["--package", "alpagym-runtime"])
+    launcher_args.extend(
+        [
+            "python",
+            "-m",
+            "cosmos_rl.launcher.launch_all",
+            "--config",
+            str(config.artifact_paths.cosmos_config_path),
+            "--policy",
+            str(config.cosmos.launch.policy_replicas),
+            "--rollout",
+            str(config.cosmos.launch.rollout_replicas),
+            "--num-workers",
+            str(worker_count),
+            "--worker-idx",
+            str(worker_index),
+        ]
+    )
     if controller_port is not None:
         launcher_args.extend(["--port", str(controller_port)])
     if controller_url is not None:
