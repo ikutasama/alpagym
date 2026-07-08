@@ -82,9 +82,25 @@ def validate_local_process_config(execution_backend: ExecutionBackend) -> None:
 
 
 def execute_run(config: RunConfig) -> None:
-    """Execute a run through the shared local and Slurm lifecycle."""
+    """Execute a run through the shared local and Slurm lifecycle.
+
+    Disaggregated mode splits the lifecycle across two machines using
+    environment variables:
+
+    - ``ALPAGYM_WIZARD_ONLY=1``: start AlPaSim Wizard, publish runtime
+      endpoints and scene ids, then block until interrupted (Ctrl+C).
+      The generated run directory is copied to the Cosmos machine.
+    - ``ALPAGYM_COSMOS_ONLY=1``: skip Wizard startup and run the Cosmos
+      launcher directly, using the pre-existing topology registry and
+      scene id files from the copied run directory.
+    """
     execution_backend = ExecutionBackend(config.execution.backend)
-    validate_local_process_config(execution_backend)
+    wizard_only = os.environ.get("ALPAGYM_WIZARD_ONLY") == "1"
+    cosmos_only = os.environ.get("ALPAGYM_COSMOS_ONLY") == "1"
+    if wizard_only and cosmos_only:
+        raise ValueError("Cannot set both ALPAGYM_WIZARD_ONLY and ALPAGYM_COSMOS_ONLY")
+    if not cosmos_only:
+        validate_local_process_config(execution_backend)
     scene_selector = (
         f"{len(config.dataset.scene_ids)} scene ids"
         if config.dataset.scene_ids is not None
@@ -127,117 +143,147 @@ def execute_run(config: RunConfig) -> None:
         container_image = None
 
     _log_topology(topology)
-    alpasim_checkout_root = resolve_alpasim_checkout(config=config.alpasim)
+    alpasim_checkout_root: Path | None = (
+        resolve_alpasim_checkout(config=config.alpasim) if not cosmos_only else None
+    )
     registry = FileTopologyRegistry(config.artifact_paths.topology_registry_dir)
     wizard_processes: list[subprocess.Popen[str]] = []
     alpasim_hosts = topology.alpasim_host_plans
     try:
-        logging.info("Starting %d AlpaSim Wizard process(es)", len(alpasim_hosts))
-        for runtime_index, host in enumerate(alpasim_hosts):
-            wizard_processes.append(
-                _start_wizard_process(
-                    config=config,
-                    execution_backend=execution_backend,
-                    host=host,
-                    runtime_index=runtime_index,
-                    alpasim_checkout_root=alpasim_checkout_root,
+        if not cosmos_only:
+            logging.info("Starting %d AlpaSim Wizard process(es)", len(alpasim_hosts))
+            for runtime_index, host in enumerate(alpasim_hosts):
+                wizard_processes.append(
+                    _start_wizard_process(
+                        config=config,
+                        execution_backend=execution_backend,
+                        host=host,
+                        runtime_index=runtime_index,
+                        alpasim_checkout_root=alpasim_checkout_root,
+                    )
                 )
+
+            logging.info("Waiting for %d AlpaSim runtime endpoint(s)", len(alpasim_hosts))
+            runtime_scene_ids: list[str] | None = None
+            for runtime_index, (host, process) in enumerate(
+                zip(alpasim_hosts, wizard_processes, strict=True)
+            ):
+                _ensure_wizard_processes_running(wizard_processes)
+                wizard_log_dir = _wizard_log_dir(config=config, runtime_index=runtime_index)
+                runtime_host, runtime_port = wait_for_runtime_ready(
+                    wizard_process=process,
+                    runtime_server_path=wizard_log_dir / "generated-runtime-server.yaml",
+                    timeout_s=config.alpasim.startup_timeout_s,
+                    published_host=host.hostname,
+                )
+                runtime_capacity, scene_ids = fetch_runtime_info(
+                    runtime_host,
+                    runtime_port,
+                    timeout_s=config.alpasim.startup_timeout_s,
+                )
+                if not scene_ids:
+                    raise ValueError(f"AlpaSim runtime {runtime_index} reported no scenes")
+                if runtime_scene_ids is None:
+                    runtime_scene_ids = scene_ids
+                elif scene_ids != runtime_scene_ids:
+                    raise ValueError(
+                        "AlpaSim runtimes reported different scene lists: "
+                        f"{runtime_scene_ids!r} != {scene_ids!r}"
+                    )
+                endpoint = TopologyEndpoint(
+                    id=f"alpasim-runtime-{runtime_index}",
+                    host=runtime_host,
+                    port=runtime_port,
+                    capacity=runtime_capacity,
+                )
+                registry.publish_alpasim_runtime(endpoint)
+                logging.info(
+                    "Published AlpaSim runtime: id=alpasim-runtime-%d host=%s port=%d capacity=%d",
+                    runtime_index,
+                    runtime_host,
+                    runtime_port,
+                    runtime_capacity,
+                )
+
+            config.artifact_paths.alpasim_scene_ids_path.write_text(
+                yaml.safe_dump(
+                    {"scene_ids": runtime_scene_ids or []},
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
             )
 
-        logging.info("Waiting for %d AlpaSim runtime endpoint(s)", len(alpasim_hosts))
-        runtime_scene_ids: list[str] | None = None
-        for runtime_index, (host, process) in enumerate(
-            zip(alpasim_hosts, wizard_processes, strict=True)
-        ):
-            _ensure_wizard_processes_running(wizard_processes)
-            wizard_log_dir = _wizard_log_dir(config=config, runtime_index=runtime_index)
-            runtime_host, runtime_port = wait_for_runtime_ready(
-                wizard_process=process,
-                runtime_server_path=wizard_log_dir / "generated-runtime-server.yaml",
-                timeout_s=config.alpasim.startup_timeout_s,
-                published_host=host.hostname,
-            )
-            runtime_capacity, scene_ids = fetch_runtime_info(
-                runtime_host,
-                runtime_port,
-                timeout_s=config.alpasim.startup_timeout_s,
-            )
-            if not scene_ids:
-                raise ValueError(f"AlpaSim runtime {runtime_index} reported no scenes")
-            if runtime_scene_ids is None:
-                runtime_scene_ids = scene_ids
-            elif scene_ids != runtime_scene_ids:
-                raise ValueError(
-                    "AlpaSim runtimes reported different scene lists: "
-                    f"{runtime_scene_ids!r} != {scene_ids!r}"
-                )
-            endpoint = TopologyEndpoint(
-                id=f"alpasim-runtime-{runtime_index}",
-                host=runtime_host,
-                port=runtime_port,
-                capacity=runtime_capacity,
-            )
-            registry.publish_alpasim_runtime(endpoint)
-            logging.info(
-                "Published AlpaSim runtime: id=alpasim-runtime-%d host=%s port=%d capacity=%d",
-                runtime_index,
-                runtime_host,
-                runtime_port,
-                runtime_capacity,
-            )
+        if wizard_only:
+            _print_wizard_only_banner(config, registry)
+            for process in wizard_processes:
+                process.wait()
 
-        config.artifact_paths.alpasim_scene_ids_path.write_text(
-            yaml.safe_dump(
-                {"scene_ids": runtime_scene_ids or []},
-                sort_keys=False,
-            ),
-            encoding="utf-8",
-        )
-        cosmos_command = _build_cosmos_command(
-            config=config,
-            execution_backend=execution_backend,
-            topology=topology,
-            container_image=container_image,
-        )
-        logging.info(
-            "Starting Cosmos launcher: backend=%s cosmos_hosts=%s log_dir=%s",
-            execution_backend.value,
-            ",".join(topology.cosmos_hosts),
-            config.artifact_paths.log_dir,
-        )
-        logging.info("Starting Cosmos launcher command: %s", cosmos_command)
-        # Write the NCCL fabric env to the host os.environ right before the Cosmos
-        # launch. Locally the subprocess inherits it; on Slurm `srun --export=ALL`
-        # carries it to every Policy/Rollout/Controller worker (and `bash -lc` does
-        # not strip NCCL_*). It governs both the AlpaGym data plane and cosmos-rl's
-        # native weight-sync mesh. Disk runs leave nccl_env empty, so this is a no-op.
-        apply_transport_env_vars(config.transport)
-        if config.transport.nccl_env:
+        if not wizard_only:
+            cosmos_command = _build_cosmos_command(
+                config=config,
+                execution_backend=execution_backend,
+                topology=topology,
+                container_image=container_image,
+            )
             logging.info(
-                "Applied NCCL fabric env to os.environ: %s", dict(config.transport.nccl_env)
+                "Starting Cosmos launcher: backend=%s cosmos_hosts=%s log_dir=%s",
+                execution_backend.value,
+                ",".join(topology.cosmos_hosts),
+                config.artifact_paths.log_dir,
             )
-        # Unbuffer worker stdout so cosmos-rl's import-time print() output (e.g. its
-        # model auto-discovery) is interleaved in order instead of being flushed in a
-        # block when the process exits.
-        os.environ["PYTHONUNBUFFERED"] = "1"
-        # Only local runs inherit this terminal; Slurm replicas write their own logs.
-        tee_logs = (
-            tee_role_logs(config.artifact_paths.log_dir)
-            if not execution_backend.is_slurm_run
-            else nullcontext()
-        )
-        with organize_role_logs(config.artifact_paths.log_dir), tee_logs:
-            subprocess.run(
-                cosmos_command,
-                check=True,
-                text=True,
+            logging.info("Starting Cosmos launcher command: %s", cosmos_command)
+            apply_transport_env_vars(config.transport)
+            if config.transport.nccl_env:
+                logging.info(
+                    "Applied NCCL fabric env to os.environ: %s", dict(config.transport.nccl_env)
+                )
+            os.environ["PYTHONUNBUFFERED"] = "1"
+            tee_logs = (
+                tee_role_logs(config.artifact_paths.log_dir)
+                if not execution_backend.is_slurm_run
+                else nullcontext()
             )
-        logging.info("Cosmos launcher completed")
+            with organize_role_logs(config.artifact_paths.log_dir), tee_logs:
+                subprocess.run(
+                    cosmos_command,
+                    check=True,
+                    text=True,
+                )
+            logging.info("Cosmos launcher completed")
     finally:
         if wizard_processes:
             logging.info("Stopping %d AlpaSim Wizard process(es)", len(wizard_processes))
         for process in wizard_processes:
             ensure_process_terminated(process)
+
+
+def _print_wizard_only_banner(
+    config: RunConfig, registry: FileTopologyRegistry
+) -> None:
+    """Print disaggregated-mode instructions for the Wizard-only host."""
+    endpoints = registry.list_alpasim_runtimes()
+    run_dir = config.artifact_paths.run_dir
+    print()
+    print("=" * 64)
+    print("AlPaSim Wizard ready (disaggregated mode)")
+    print("=" * 64)
+    for ep in endpoints:
+        print(f"  Runtime endpoint: {ep.to_grpc_target()}  (capacity={ep.capacity})")
+    print(f"  Run directory:    {run_dir}")
+    print()
+    print("On the Cosmos machine:")
+    for ep in endpoints:
+        print(f"  1. SSH tunnel:  ssh -N -L {ep.port}:localhost:{ep.port} <user>@<wizard_host>")
+    print(f"  2. Copy run dir: scp -r <user>@<wizard_host>:{run_dir} <local_path>/")
+    print(f"  3. Run Cosmos:  ALPAGYM_COSMOS_ONLY=1 alpagym run \\")
+    print(f"       execution.resolved_config_path=<local_path>/{run_dir.name}/resolved_config.yaml")
+    print()
+    print("Press Ctrl+C to stop the wizard.")
+    print("=" * 64)
+    logging.info(
+        "Wizard-only mode: blocking until interrupted. Runtime endpoints: %s",
+        ", ".join(ep.to_grpc_target() for ep in endpoints),
+    )
 
 
 def _start_wizard_process(
