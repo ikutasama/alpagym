@@ -263,6 +263,14 @@ def _print_wizard_only_banner(
     """Print disaggregated-mode instructions for the Wizard-only host."""
     endpoints = registry.list_alpasim_runtimes()
     run_dir = config.artifact_paths.run_dir
+    # Create 'latest' symlink so downstream commands don't need the timestamp.
+    latest = run_dir.parent / "latest"
+    try:
+        if latest.is_symlink() or latest.exists():
+            latest.unlink()
+        latest.symlink_to(run_dir)
+    except OSError:
+        pass
     print()
     print("=" * 64)
     print("AlPaSim Wizard ready (disaggregated mode)")
@@ -270,13 +278,14 @@ def _print_wizard_only_banner(
     for ep in endpoints:
         print(f"  Runtime endpoint: {ep.to_grpc_target()}  (capacity={ep.capacity})")
     print(f"  Run directory:    {run_dir}")
+    print(f"  Symlink:          {latest}")
     print()
     print("On the Cosmos machine:")
     for ep in endpoints:
         print(f"  1. SSH tunnel:  ssh -N -L {ep.port}:localhost:{ep.port} <user>@<wizard_host>")
-    print(f"  2. Copy run dir: scp -r <user>@<wizard_host>:{run_dir} <local_path>/")
+    print(f"  2. Copy run dir: scp -rL <user>@<wizard_host>:{latest} <local_path>/")
     print(f"  3. Run Cosmos:  ALPAGYM_COSMOS_ONLY=1 alpagym run \\")
-    print(f"       execution.resolved_config_path=<local_path>/{run_dir.name}/resolved_config.yaml")
+    print(f"       execution.resolved_config_path=<local_path>/latest/resolved_config.yaml")
     print()
     print("Press Ctrl+C to stop the wizard.")
     print("=" * 64)
