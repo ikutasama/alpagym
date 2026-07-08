@@ -268,7 +268,7 @@ def _print_wizard_only_banner(
     try:
         if latest.is_symlink() or latest.exists():
             latest.unlink()
-        latest.symlink_to(run_dir)
+        latest.symlink_to(run_dir.resolve())
     except OSError:
         pass
     print()
