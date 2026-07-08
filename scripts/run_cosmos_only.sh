@@ -2,7 +2,7 @@
 # Disaggregated mode: Cosmos-only (run on the A100 / training machine).
 #
 # Usage:
-#   ./scripts/run_cosmos_only.sh <copied_run_dir> [--model-path <path>]
+#   ./scripts/run_cosmos_only.sh <copied_run_dir> [--path-remap <old>:<new>]
 #
 # Prerequisites:
 #   1. SSH tunnel to the Wizard machine must already be established:
@@ -10,55 +10,65 @@
 #      (port is printed by run_wizard_only.sh)
 #   2. The run directory from the Wizard machine must be copied here:
 #      scp -r <user>@<wizard_host>:<run_dir> <local_path>
-#   3. The model checkpoint must be accessible locally (override with --model-path
-#      or MODEL_PATH env var if the path differs from the Wizard machine).
+#   3. Model and checkpoint must be accessible locally. If paths differ from
+#      the Wizard machine, use --path-remap to fix them (e.g. /mnt_m62:/data/mnt_m62).
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
-  echo "Usage: $0 <copied_run_dir> [--model-path <path>]" >&2
+  echo "Usage: $0 <copied_run_dir> [--path-remap <old>:<new>]" >&2
   exit 1
 fi
 
 RUN_DIR="$(cd "$1" && pwd)"
 shift
 
-MODEL_PATH_OVERRIDE=""
+PATH_REMAP=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --model-path) MODEL_PATH_OVERRIDE="$2"; shift 2 ;;
+    --path-remap) PATH_REMAP="$2"; shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
 
-if [ -n "${MODEL_PATH:-}" ] && [ -z "$MODEL_PATH_OVERRIDE" ]; then
-  MODEL_PATH_OVERRIDE="$MODEL_PATH"
-fi
-
-# Fix absolute paths in resolved_config.yaml so they point to the local copy.
+# Fix absolute paths in resolved_config.yaml so they point to local filesystem.
 python3 -c "
 import yaml, sys, os
 run_dir = sys.argv[1]
-model_override = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
+path_remap = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
 cfg_path = os.path.join(run_dir, 'resolved_config.yaml')
 with open(cfg_path) as f:
     cfg = yaml.safe_load(f)
+
 old_run_dir = cfg['artifact_paths']['run_dir']
-# Remap every artifact_paths field from old run_dir prefix to new.
-for k, v in cfg['artifact_paths'].items():
-    if isinstance(v, str) and v.startswith(old_run_dir):
-        cfg['artifact_paths'][k] = v.replace(old_run_dir, run_dir, 1)
-if model_override:
-    cfg['policy']['model']['path'] = model_override
+
+def remap(v):
+    if not isinstance(v, str):
+        return v
+    if v.startswith(old_run_dir):
+        v = v.replace(old_run_dir, run_dir, 1)
+    if path_remap:
+        old, new = path_remap.split(':', 1)
+        v = v.replace(old, new)
+    return v
+
+def walk(obj):
+    if isinstance(obj, dict):
+        return {k: walk(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [walk(v) for v in obj]
+    return remap(obj)
+
+cfg = walk(cfg)
 with open(cfg_path, 'w') as f:
     yaml.safe_dump(cfg, f, sort_keys=False, default_flow_style=False)
-print(f'Fixed paths in {cfg_path}: run_dir {old_run_dir} -> {run_dir}')
-" "$RUN_DIR" "$MODEL_PATH_OVERRIDE"
+print(f'Fixed paths: run_dir {old_run_dir} -> {run_dir}', flush=True)
+if path_remap:
+    print(f'Path remap: {path_remap}', flush=True)
+" "$RUN_DIR" "$PATH_REMAP"
 
-cd "${ALPAGYM_ROOT:-$HOME/alpagym}"
+cd "${ALPAGYM_ROOT:-/data/mnt_m62/10_personal/z59900495/workspace/alpagym}"
 
 export GRPC_ARG_ENABLE_HTTP_PROXY="${GRPC_ARG_ENABLE_HTTP_PROXY:-0}"
-export grpc_proxy="" http_proxy="" https_proxy=""
-export HTTP_PROXY="" HTTPS_PROXY=""
 export no_proxy="localhost,127.0.0.1,0.0.0.0"
 export NO_PROXY="localhost,127.0.0.1,0.0.0.0"
 
@@ -66,6 +76,7 @@ export UV_NO_MANAGED_PYTHON="${UV_NO_MANAGED_PYTHON:-1}"
 export UV_PYTHON="${UV_PYTHON:-$(command -v python)}"
 export UV_SYSTEM_CERTS="${UV_SYSTEM_CERTS:-true}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1,2,3,4,5,6}"
 
 export ALPAGYM_COSMOS_ONLY=1
 
