@@ -35,31 +35,32 @@ export AUTOVLA_REPO_PATH="${AUTOVLA_REPO_PATH:-/mnt/mnt_m62/10_personal/z5990049
 # disjoint segments.
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
-# Install 3-camera config (wide+left+right, no tele) into the AlPaSim wizard
-# configs directory so Hydra can resolve +cameras=3cam_1080.
+# Install camera config into the AlPaSim wizard configs directory so Hydra can
+# resolve +cameras=${CAMERAS_PRESET}.
 # AlPaSim may run from a local checkout (ALPASIM_ROOT) or from a content-
 # addressed cache at ~/.cache/alpagym/alpasim/<hash>/ — copy to both if they exist.
-CAM_SRC="${ALPAGYM_ROOT:-$HOME/alpagym}/scripts/cameras/3cam_1080.yaml"
+CAMERAS_PRESET="${CAMERAS_PRESET:-3cam_512}"
+CAM_SRC="${ALPAGYM_ROOT:-$HOME/alpagym}/scripts/cameras/${CAMERAS_PRESET}.yaml"
 CAMERA_DIR="src/wizard/configs/cameras"
 
 # 1) Explicit ALPASIM_ROOT (local checkout)
 COPY_TARGETS=()
 if [ -n "${ALPASIM_ROOT:-}" ] && [ -d "${ALPASIM_ROOT}/${CAMERA_DIR}" ]; then
-  COPY_TARGETS+=("${ALPASIM_ROOT}/${CAMERA_DIR}/3cam_1080.yaml")
+  COPY_TARGETS+=("${ALPASIM_ROOT}/${CAMERA_DIR}/${CAMERAS_PRESET}.yaml")
 fi
 
 # 2) Cached checkout(s) under ~/.cache/alpagym/alpasim/*/  (may be multiple hashes)
 CACHE_BASE="${XDG_CACHE_HOME:-$HOME/.cache}/alpagym/alpasim"
 for d in "${CACHE_BASE}"/*/; do
   if [ -d "${d}${CAMERA_DIR}" ]; then
-    COPY_TARGETS+=("${d}${CAMERA_DIR}/3cam_1080.yaml")
+    COPY_TARGETS+=("${d}${CAMERA_DIR}/${CAMERAS_PRESET}.yaml")
   fi
 done
 
 for dst in "${COPY_TARGETS[@]}"; do
   if [ -f "${CAM_SRC}" ]; then
     cp -f "${CAM_SRC}" "${dst}"
-    echo "Installed 3cam_1080.yaml -> ${dst}"
+    echo "Installed ${CAMERAS_PRESET}.yaml -> ${dst}"
   fi
 done
 
@@ -76,7 +77,7 @@ EXPERIMENT="${EXPERIMENT:-autovla_local_smoke}"
 REWARD="${REWARD:-progress_safety}"
 MODEL_PATH="${MODEL_PATH:-/mnt/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Qwen/Qwen2.5-VL-3B-Instruct}"
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-/mnt/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Zewei-Zhou/AutoVLA/AutoVLA_PDMS_89.ckpt}"
-ALPASIM_EXTRA_OVERRIDES="${ALPASIM_EXTRA_OVERRIDES:-+cameras=3cam_1080 runtime.simulation_config.pose_reporting_interval_us=100000 scenes.local_usdz_dir=/mnt/mnt_m181/z59900495/workspace/DownloadTool-master/nvidia/PhysicalAI-Autonomous-Vehicles-NuRec}"
+ALPASIM_EXTRA_OVERRIDES="${ALPASIM_EXTRA_OVERRIDES:-+cameras=${CAMERAS_PRESET} runtime.simulation_config.pose_reporting_interval_us=100000 scenes.local_uszd_dir=/mnt/mnt_m181/z59900495/workspace/DownloadTool-master/nvidia/PhysicalAI-Autonomous-Vehicles-NuRec}"
 
 exec uv run --no-sync --all-packages python -m alpagym_host.cli \
   "experiment=${EXPERIMENT}" \

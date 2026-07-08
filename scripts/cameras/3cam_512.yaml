@@ -1,0 +1,30 @@
+# @package _global_
+
+# 3-camera configuration for AutoVLA smoke test (wide + left + right, no tele).
+# Renders at 320x512 (model native resolution) to minimize renderer VRAM in
+# colocated mode where rollout and training share one GPU.
+# At 1080p the renderer uses ~9 GiB; at 320x512 it should use ~1-2 GiB.
+
+runtime:
+  simulation_config:
+    cameras:
+    - # Front wide camera
+      logical_id: camera_front_wide_120fov
+      height: 320
+      width: 512
+      frame_interval_us: 100_000  # 10 Hz
+      shutter_duration_us: 30_000
+
+    - # Left cross camera
+      logical_id: camera_cross_left_120fov
+      height: 320
+      width: 512
+      frame_interval_us: 100_000  # 10 Hz
+      shutter_duration_us: 30_000
+
+    - # Right cross camera
+      logical_id: camera_cross_right_120fov
+      height: 320
+      width: 512
+      frame_interval_us: 100_000  # 10 Hz
+      shutter_duration_us: 30_000
