@@ -10,7 +10,7 @@
 # Requires sshpass: sudo apt install sshpass
 # (Or set up key auth: ssh-copy-id -p 8040 root@10.50.121.187)
 
-PORT="${1:?Usage: $0 <runtime_port>}"
+PORT="${1:-5011}"
 A100_HOST="${A100_HOST:-10.50.121.187}"
 A100_PORT="${A100_PORT:-8040}"
 A100_USER="${A100_USER:-root}"
