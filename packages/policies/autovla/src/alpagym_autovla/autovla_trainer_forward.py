@@ -30,11 +30,13 @@ def set_trainer_config(
     model_path: str,
     action_start_id: int = 151665,
     num_poses: int = 10,
+    use_cot: bool = False,
 ) -> None:
     """Store config needed by the patched training forward."""
     _trainer_config["model_path"] = Path(model_path)
     _trainer_config["action_start_id"] = action_start_id
     _trainer_config["num_poses"] = num_poses
+    _trainer_config["use_cot"] = use_cot
     _trainer_config["_processor"] = None  # lazy init
 
 
@@ -70,8 +72,9 @@ def _build_qwen_inputs_for_training(
     """Rebuild Qwen2.5-VL processor inputs from raw camera frames.
 
     This is the trainer-side mirror of
-    ``AutoVLAInferenceModel._build_qwen_inputs`` — same chat template,
-    same video grouping, same pixel constraints — so the rebuilt
+    ``AutoVLAInferenceModel._build_qwen_inputs`` + ``_build_user_content``
+    — same chat template, same video grouping, same pixel constraints,
+    same system text (including CoT variant) — so the rebuilt
     ``pixel_values`` / ``input_ids`` match what the rollout used.
     """
     from PIL import Image
@@ -88,14 +91,17 @@ def _build_qwen_inputs_for_training(
             frame = np.transpose(frame, (1, 2, 0))
         pil_images.append(Image.fromarray(frame))
 
-    # Velocity from ego history
+    # Velocity/acceleration from ego history (same as inference)
     if ego_history_xyz.shape[0] >= 2:
         diff = ego_history_xyz[1:] - ego_history_xyz[:-1]
         velocity = float(torch.norm(diff[-1][:2]).item())
+        acceleration = float(torch.norm(diff[-1][:2] - diff[-2][:2]).item()
+                             if diff.shape[0] >= 2 else 0.0)
     else:
         velocity = 0.0
+        acceleration = 0.0
 
-    # Instruction from route
+    # Instruction from route (same as inference)
     if route_xy is not None and route_xy.shape[0] > 0:
         first_wp = route_xy[0]
         if abs(float(first_wp[0])) > abs(float(first_wp[1])):
@@ -105,35 +111,29 @@ def _build_qwen_inputs_for_training(
     else:
         instruction = "move forward"
 
-    # Build user content (same structure as inference)
+    # Build user content — mirrors _build_user_content exactly
     min_pixels = 28 * 28 * 128
     max_pixels = 28 * 28 * 128
     content: list[dict[str, Any]] = [
         {"type": "text", "text": "The autonomous vehicle is equipped with cameras enabling perception of the surrounding environment."},
     ]
 
-    frames_per_cam = max(1, num_cams // 3) if num_cams >= 3 else num_cams
-    cam_names = ["front", "left", "right"]
-
-    if num_cams >= 3:
+    num_images = len(pil_images)
+    if num_images >= 12:
+        cam_names = ["front", "front-left", "front-right"]
+        frames_per_cam = num_images // 3
         for cam_idx in range(3):
             start = cam_idx * frames_per_cam
             cam_frames = pil_images[start:start + frames_per_cam]
-            content.append({
-                "type": "text",
-                "text": f"Video {cam_idx+1}: {cam_names[cam_idx]} view, {frames_per_cam} frames at 2 Hz.",
-            })
+            content.append({"type": "text", "text": f"Video {cam_idx+1}: {cam_names[cam_idx]} view, {frames_per_cam} frames at 2 Hz."})
             content.append({
                 "type": "video",
                 "min_pixels": min_pixels,
                 "max_pixels": max_pixels,
                 "video": cam_frames,
             })
-    elif num_cams >= 4:
-        content.append({
-            "type": "text",
-            "text": f"Front view video, {num_cams} frames at 2 Hz.",
-        })
+    elif num_images >= 4:
+        content.append({"type": "text", "text": f"Front view video, {num_images} frames at 2 Hz."})
         content.append({
             "type": "video",
             "min_pixels": min_pixels,
@@ -142,29 +142,37 @@ def _build_qwen_inputs_for_training(
         })
     else:
         for img in pil_images:
-            content.append({
-                "type": "image",
-                "image": img,
-                "min_pixels": min_pixels,
-                "max_pixels": max_pixels,
-            })
+            content.append({"type": "image", "image": img, "min_pixels": min_pixels, "max_pixels": max_pixels})
 
     content.append({
         "type": "text",
         "text": (
             f"The current velocity of the vehicle is {velocity:.3f} m/s, "
-            f"the acceleration is 0.000 m/s^2. "
+            f"and the current acceleration is {acceleration:.3f} m/s^2. "
             f"The driving instruction is: {instruction}. "
-            f"Please predict the future trajectory."
+            f"Based on this information, plan the action trajectory for the "
+            f"autonomous vehicle over the next five seconds."
         ),
     })
 
-    system_text = (
-        "You are an Advanced Driver Assistance and Full Self-Driving System. "
-        "You will receive visual observations from the ego vehicle's cameras "
-        "and dynamic information about the vehicle's current state. "
-        "Your task is to predict the optimal driving action for the next five seconds."
-    )
+    # System text — matches inference model's CoT / non-CoT variants
+    use_cot = _trainer_config.get("use_cot", False)
+    if use_cot:
+        system_text = (
+            "You are an Advanced Driver Assistance and Full Self-Driving System. "
+            "You will be provided with video observations from the ego vehicle's "
+            "surrounding cameras, along with the vehicle's current dynamic states. "
+            "Your task is to predict the most appropriate driving action for the "
+            "next five seconds."
+        )
+    else:
+        system_text = (
+            "You are an Advanced Driver Assistance and Full Self-Driving System. "
+            "You will receive visual observations from the ego vehicle's cameras "
+            "and dynamic information about the vehicle's current state. "
+            "Your task is to predict the optimal driving action for the next five seconds."
+        )
+
     messages = [
         {"role": "system", "content": [{"type": "text", "text": system_text}]},
         {"role": "user", "content": content},
@@ -177,14 +185,15 @@ def _build_qwen_inputs_for_training(
     try:
         from qwen_vl_utils import process_vision_info
         image_inputs, video_inputs = process_vision_info(messages)
-        processor_kwargs = {
+        processor_kwargs: dict[str, Any] = {
             "text": [text],
             "images": image_inputs,
             "videos": video_inputs,
             "padding": True,
             "return_tensors": "pt",
         }
-    except Exception:
+    except Exception as exc:
+        logger.warning("Falling back to image-only Qwen processor path: %s", exc)
         processor_kwargs = {
             "text": [text],
             "images": pil_images,

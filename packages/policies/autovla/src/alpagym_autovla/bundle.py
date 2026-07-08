@@ -83,6 +83,7 @@ def build_data_packer(run_config: Any, cosmos_role: str | None) -> Any:
             model_path=str(vlm_path),
             action_start_id=bc.get("action_start_id", 151665),
             num_poses=bc.get("trajectory", {}).get("num_poses", 10),
+            use_cot=bc.get("use_cot", False),
         )
 
     return build_alpagym_data_packer(
