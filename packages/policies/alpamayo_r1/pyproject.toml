@@ -23,4 +23,4 @@ where = ["src"]
 "alpagym_alpamayo_r1.configs" = ["**/*.yaml"]
 
 [tool.uv.sources]
-alpamayo1-x-rl = { git = "https://github.com/NVlabs/alpamayo-recipes.git", subdirectory = "recipes/alpamayo1_x_rl", rev = "2051ab71480ad74876b52bfd87dc67cb8f66483d" }
+alpamayo1-x-rl = { git = "https://github.com/NVlabs/alpamayo-recipes.git", subdirectory = "recipes/alpamayo1_x_rl", rev = "1d99fc50370c96637157455da386323a44663c9d" }

@@ -106,7 +106,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "alpagym-runtime", editable = "packages/runtime" },
-    { name = "alpamayo1-x-rl", git = "https://github.com/NVlabs/alpamayo-recipes.git?subdirectory=recipes%2Falpamayo1_x_rl&rev=2051ab71480ad74876b52bfd87dc67cb8f66483d" },
+    { name = "alpamayo1-x-rl", git = "https://github.com/NVlabs/alpamayo-recipes.git?subdirectory=recipes%2Falpamayo1_x_rl&rev=1d99fc50370c96637157455da386323a44663c9d" },
 ]
 
 [[package]]
@@ -169,7 +169,7 @@ dependencies = [
 requires-dist = [
     { name = "alpagym-host", editable = "packages/host" },
     { name = "alpagym-plugins", editable = "packages/plugins" },
-    { name = "alpamayo-recipes", git = "https://github.com/NVlabs/alpamayo-recipes.git?subdirectory=src&rev=2051ab71480ad74876b52bfd87dc67cb8f66483d" },
+    { name = "alpamayo-recipes", git = "https://github.com/NVlabs/alpamayo-recipes.git?subdirectory=src&rev=1d99fc50370c96637157455da386323a44663c9d" },
     { name = "alpasim-grpc", git = "https://github.com/NVlabs/alpasim.git?subdirectory=src%2Fgrpc&rev=46b401beaec27977cbb86826df8e39cec2d49e49" },
     { name = "cosmos-rl", extras = ["rl", "wfm"], git = "https://github.com/nvidia-cosmos/cosmos-rl.git?rev=d2a2c57c4bd6496482bc42da19a59b4432705eda" },
     { name = "einops" },
@@ -229,12 +229,12 @@ dependencies = [
 [[package]]
 name = "alpamayo-recipes"
 version = "0.1.0"
-source = { git = "https://github.com/NVlabs/alpamayo-recipes.git?subdirectory=src&rev=2051ab71480ad74876b52bfd87dc67cb8f66483d#2051ab71480ad74876b52bfd87dc67cb8f66483d" }
+source = { git = "https://github.com/NVlabs/alpamayo-recipes.git?subdirectory=src&rev=1d99fc50370c96637157455da386323a44663c9d#1d99fc50370c96637157455da386323a44663c9d" }
 
 [[package]]
 name = "alpamayo1-x-rl"
 version = "0.1.0"
-source = { git = "https://github.com/NVlabs/alpamayo-recipes.git?subdirectory=recipes%2Falpamayo1_x_rl&rev=2051ab71480ad74876b52bfd87dc67cb8f66483d#2051ab71480ad74876b52bfd87dc67cb8f66483d" }
+source = { git = "https://github.com/NVlabs/alpamayo-recipes.git?subdirectory=recipes%2Falpamayo1_x_rl&rev=1d99fc50370c96637157455da386323a44663c9d#1d99fc50370c96637157455da386323a44663c9d" }
 dependencies = [
     { name = "alpamayo-r1", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "alpamayo-recipes", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
