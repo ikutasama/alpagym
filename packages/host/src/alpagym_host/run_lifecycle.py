@@ -283,7 +283,7 @@ def _print_wizard_only_banner(
     print("On the Cosmos machine:")
     for ep in endpoints:
         print(f"  1. SSH tunnel:  ssh -N -L {ep.port}:localhost:{ep.port} <user>@<wizard_host>")
-    print(f"  2. Copy run dir: scp -rL <user>@<wizard_host>:{latest} <local_path>/")
+    print(f"  2. Copy run dir: scp -r -P <port> \"$(readlink -f {latest})\" <user>@<cosmos_host>:<local_path>/latest")
     print(f"  3. Run Cosmos:  ALPAGYM_COSMOS_ONLY=1 alpagym run \\")
     print(f"       execution.resolved_config_path=<local_path>/latest/resolved_config.yaml")
     print()
