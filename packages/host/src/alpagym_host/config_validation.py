@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import math
-import os
 from pathlib import Path
 
 from alpagym_host.alpasim_dependency import validate_alpasim_checkout_cache
@@ -45,10 +44,7 @@ def validate_run_config(
     _validate_training_policy_config(config)
     _validate_cosmos_grpo_batch_geometry(config.cosmos)
     _validate_transport_config(config)
-    # Skip model path validation in wizard-only mode — the wizard only runs
-    # AlPaSim rendering and does not need the model files locally.
-    if os.environ.get("ALPAGYM_WIZARD_ONLY") != "1":
-        _validate_policy_model_path(config)
+    _validate_policy_model_path(config)
     _validate_cosmos_mode(config)
     execution_backend = ExecutionBackend(config.execution.backend)
     if requested_command == "submit" and not execution_backend.is_slurm_run:
