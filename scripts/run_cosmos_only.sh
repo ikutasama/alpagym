@@ -32,10 +32,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# Fix absolute paths in resolved_config.yaml so they point to local filesystem.
-# Always start from the original backup to avoid double-remap corruption.
+# Fix absolute paths in resolved_config.yaml and cosmos_config.toml so they
+# point to local filesystem. Always start from the original backup to avoid
+# double-remap corruption.
 uv run --no-sync python -c "
-import yaml, sys, os, shutil
+import yaml, sys, os, shutil, re
 run_dir = sys.argv[1]
 path_remap = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
 cfg_path = os.path.join(run_dir, 'resolved_config.yaml')
@@ -72,6 +73,26 @@ with open(cfg_path, 'w') as f:
 print(f'Fixed paths: run_dir {old_run_dir} -> {run_dir}', flush=True)
 if path_remap:
     print(f'Path remap: {path_remap}', flush=True)
+
+# Also fix resolved_config_path in cosmos_config.toml
+toml_path = os.path.join(run_dir, 'cosmos_config.toml')
+toml_backup = os.path.join(run_dir, 'cosmos_config.toml.orig')
+if os.path.isfile(toml_path):
+    if os.path.isfile(toml_backup):
+        shutil.copy2(toml_backup, toml_path)
+    else:
+        shutil.copy2(toml_path, toml_backup)
+    with open(toml_path) as f:
+        toml_text = f.read()
+    # Replace any resolved_config_path value with the local path
+    toml_text = re.sub(
+        r'resolved_config_path\s*=\s*\"[^\"]*\"',
+        f'resolved_config_path = \"{os.path.join(run_dir, \"resolved_config.yaml\")}\"',
+        toml_text,
+    )
+    with open(toml_path, 'w') as f:
+        f.write(toml_text)
+    print(f'Fixed cosmos_config.toml: resolved_config_path -> {run_dir}/resolved_config.yaml', flush=True)
 " "$RUN_DIR" "$PATH_REMAP"
 
 cd "${ALPAGYM_ROOT:-/data/mnt_m62/10_personal/z59900495/workspace/alpagym}"
