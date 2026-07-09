@@ -2,7 +2,7 @@
 # Disaggregated mode: Cosmos-only (run on the A100 / training machine).
 #
 # Usage:
-#   ./scripts/run_cosmos_only.sh <copied_run_dir> [--path-remap <old>:<new>]
+#   ./scripts/run_cosmos_only.sh <copied_run_dir> [--path-remap <old>:<new>] [--topology <name>]
 #
 # Prerequisites:
 #   1. SSH tunnel to the Wizard machine must already be established:
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
-  echo "Usage: $0 <copied_run_dir> [--path-remap <old>:<new>]" >&2
+  echo "Usage: $0 <copied_run_dir> [--path-remap <old>:<new>] [--topology <name>]" >&2
   exit 1
 fi
 
@@ -23,9 +23,11 @@ RUN_DIR="$(cd "$1" && pwd)"
 shift
 
 PATH_REMAP=""
+TOPOLOGY="${TOPOLOGY:-local_disaggregated_8gpu}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --path-remap) PATH_REMAP="$2"; shift 2 ;;
+    --topology) TOPOLOGY="$2"; shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -81,4 +83,6 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1,2,3,4,5,6}"
 export ALPAGYM_COSMOS_ONLY=1
 
 exec uv run --no-sync --all-packages python -m alpagym_host.cli \
-  "execution.resolved_config_path=${RUN_DIR}/resolved_config.yaml"
+  "execution.resolved_config_path=${RUN_DIR}/resolved_config.yaml" \
+  "topology=${TOPOLOGY}" \
+  "cosmos.mode=disaggregated"
