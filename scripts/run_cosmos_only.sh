@@ -33,11 +33,17 @@ while [ $# -gt 0 ]; do
 done
 
 # Fix absolute paths in resolved_config.yaml so they point to local filesystem.
+# Always start from the original backup to avoid double-remap corruption.
 uv run --no-sync python -c "
-import yaml, sys, os
+import yaml, sys, os, shutil
 run_dir = sys.argv[1]
 path_remap = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
 cfg_path = os.path.join(run_dir, 'resolved_config.yaml')
+backup_path = os.path.join(run_dir, 'resolved_config.yaml.orig')
+if os.path.isfile(backup_path):
+    shutil.copy2(backup_path, cfg_path)
+else:
+    shutil.copy2(cfg_path, backup_path)
 with open(cfg_path) as f:
     cfg = yaml.safe_load(f)
 
