@@ -36,6 +36,7 @@ members = [
   "packages/runtime",
   "packages/alpasim_configs",
   "packages/policies/alpamayo_r1",
+  "packages/policies/autovla",
 ]
 
 [tool.ty.environment]
