@@ -363,7 +363,7 @@ def _build_cosmos_command(
         return _build_cosmos_launcher_command(
             config,
             project_root=alpagym_project_root(),
-            no_sync=False,
+            no_sync=True,
             worker_count=1,
             worker_index=0,
             controller_port=config.cosmos.launch.controller_port,
