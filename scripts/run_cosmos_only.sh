@@ -31,7 +31,7 @@ while [ $# -gt 0 ]; do
 done
 
 # Fix absolute paths in resolved_config.yaml so they point to local filesystem.
-python3 -c "
+uv run --no-sync python -c "
 import yaml, sys, os
 run_dir = sys.argv[1]
 path_remap = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
