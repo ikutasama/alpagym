@@ -79,9 +79,29 @@ MODEL_PATH="${MODEL_PATH:-/mnt/mnt_m62/10_personal/z59900495/workspace/DownloadT
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-/mnt/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Zewei-Zhou/AutoVLA/AutoVLA_PDMS_89.ckpt}"
 ALPASIM_EXTRA_OVERRIDES="${ALPASIM_EXTRA_OVERRIDES:-+cameras=${CAMERAS_PRESET} runtime.simulation_config.pose_reporting_interval_us=100000 scenes.local_usdz_dir=/mnt/mnt_m181/z59900495/workspace/DownloadTool-master/nvidia/PhysicalAI-Autonomous-Vehicles-NuRec wizard.runtime_server_port=5011}"
 
-exec uv run --no-sync --all-packages python -m alpagym_host.cli \
+# Background: wait for wizard to create docker-compose.yaml, then apply
+# proxy override + rollouts volume and restart containers.  This ensures
+# Docker containers always have proxy cleared without manual intervention.
+(
+  WIZARD_DIR="${ALPAGYM_ROOT:-$HOME/alpagym}/tmp/alpagym-runs/latest/alpasim/wizard_0"
+  for i in $(seq 1 60); do
+    [ -f "${WIZARD_DIR}/docker-compose.yaml" ] && break
+    sleep 2
+  done
+  [ -f "${WIZARD_DIR}/docker-compose.yaml" ] || { echo "[alpagym] docker-compose.yaml not found, skipping override"; exit 0; }
+  sleep 10  # Let containers start and runtime become ready
+  printf 'services:\n  runtime-0:\n    environment:\n      - http_proxy=\n      - https_proxy=\n      - HTTP_PROXY=\n      - HTTPS_PROXY=\n      - no_proxy=localhost,127.0.0.1,0.0.0.0\n      - NO_PROXY=localhost,127.0.0.1,0.0.0.0\n    volumes:\n      - /tmp/alpagym-rollouts:/mnt/log_dir/rollouts\n  controller-0:\n    environment:\n      - http_proxy=\n      - https_proxy=\n      - HTTP_PROXY=\n      - HTTPS_PROXY=\n      - no_proxy=localhost,127.0.0.1,0.0.0.0\n      - NO_PROXY=localhost,127.0.0.1,0.0.0.0\n' > "${WIZARD_DIR}/docker-compose.override.yaml"
+  mkdir -p /tmp/alpagym-rollouts
+  cd "${WIZARD_DIR}" && docker compose down && docker compose up -d
+  echo "[alpagym] Docker proxy override applied and containers restarted"
+) &
+OVERRIDE_PID=$!
+
+uv run --no-sync --all-packages python -m alpagym_host.cli \
   "experiment=${EXPERIMENT}" \
   "policy.model.path=${MODEL_PATH}" \
   "+policy.model.bundle_config.checkpoint_path=${CHECKPOINT_PATH}" \
   "reward=${REWARD}" \
   "alpasim.wizard_args.extra_overrides=\"${ALPASIM_EXTRA_OVERRIDES}\""
+
+kill ${OVERRIDE_PID} 2>/dev/null || true
