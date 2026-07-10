@@ -249,8 +249,12 @@ class AutoVLAInferenceModel:
 
         pil_images = []
         for i in range(num_cams):
-            frame = camera_frames[i].cpu().numpy()  # [H, W, C]
-            pil_images.append(Image.fromarray(frame))
+            frame = camera_frames[i].cpu().numpy()  # [H, W, C] or raw bytes
+            if frame.ndim <= 1 or (frame.ndim >= 2 and min(frame.shape[:2]) <= 1):
+                # Raw JPEG/PNG bytes from AlPaSim gRPC, decode first
+                pil_images.append(Image.open(io.BytesIO(frame.tobytes())))
+            else:
+                pil_images.append(Image.fromarray(frame))
 
         # Build velocity/acceleration from ego history
         if ego_history.shape[0] >= 2:
