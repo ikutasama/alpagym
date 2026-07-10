@@ -91,7 +91,6 @@ class AlpagymRollout(RolloutBase):
         record_perf_marker("rollout/model_ready", cpu_snapshot=True, gpu_snapshot=True)
         policy_factory = build_policy_factory(self._run_config, self._inference_engine)
         distributed = ExecutionBackend(self._run_config.execution.backend).is_slurm_run
-
         driver_id = f"driver-{socket.gethostname()}-pid-{os.getpid()}"
         alpasim_runtime_endpoint: TopologyEndpoint = (
             self._topology_registry.acquire_alpasim_runtime(driver_id=driver_id)
@@ -105,7 +104,7 @@ class AlpagymRollout(RolloutBase):
             name=driver_id,
             max_concurrent_rollouts=max_concurrent_rollouts,
             policy_factory=policy_factory,
-            publish_host=socket.gethostname() if distributed else "localhost",
+            publish_host=os.environ.get("ALPAGYM_DRIVER_HOST", socket.gethostname() if distributed else "localhost"),
         )
         self._driver_server.start()
         self._topology_registry.publish_driver(self._driver_server.topology_endpoint)
