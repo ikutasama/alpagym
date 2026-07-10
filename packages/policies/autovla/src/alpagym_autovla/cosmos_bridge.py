@@ -141,6 +141,15 @@ class Qwen2_5_VLBaseModel(BaseModel):
         ckpt = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model_name_or_path, trust_remote_code=True
         ).to("cpu")
+        # Untie embeddings: FSDP skips shared (tied) parameters, which breaks
+        # cosmos-rl weight sync in disaggregated mode.  Always clone
+        # embed_tokens into lm_head so they are independent tensors that FSDP
+        # can shard and sync separately.  The cloned values are identical so
+        # model behaviour is unchanged.
+        if hasattr(ckpt, "lm_head") and hasattr(ckpt.model, "embed_tokens"):
+            ckpt.lm_head.weight = torch.nn.Parameter(
+                ckpt.model.embed_tokens.weight.data.clone()
+            )
         state = ckpt.state_dict()
         del ckpt
         self.model.load_state_dict(state, strict=True)
