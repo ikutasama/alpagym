@@ -39,7 +39,7 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 # resolve +cameras=${CAMERAS_PRESET}.
 # AlPaSim may run from a local checkout (ALPASIM_ROOT) or from a content-
 # addressed cache at ~/.cache/alpagym/alpasim/<hash>/ — copy to both if they exist.
-CAMERAS_PRESET="${CAMERAS_PRESET:-4cam_1080}"
+CAMERAS_PRESET="${CAMERAS_PRESET:-3cam_1080}"
 CAM_SRC="${ALPAGYM_ROOT:-$HOME/alpagym}/scripts/cameras/${CAMERAS_PRESET}.yaml"
 CAMERA_DIR="src/wizard/configs/cameras"
 
