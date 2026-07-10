@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+import os
 import threading
 from concurrent import futures
 from dataclasses import dataclass, field
@@ -271,9 +272,10 @@ class EgodriverServer:
             futures.ThreadPoolExecutor(max_workers=2 * max_concurrent_rollouts + 2)
         )
         add_EgodriverServiceServicer_to_server(self._servicer, self._grpc_server)
-        self.port = self._grpc_server.add_insecure_port(f"{bind_host}:0")
+        bind_port = int(os.environ.get("ALPAGYM_DRIVER_PORT", "0"))
+        self.port = self._grpc_server.add_insecure_port(f"{bind_host}:{bind_port}")
         if self.port == 0:
-            raise RuntimeError(f"Failed to bind EgodriverService on {bind_host}:0")
+            raise RuntimeError(f"Failed to bind EgodriverService on {bind_host}:{bind_port}")
 
     @property
     def topology_endpoint(self) -> TopologyEndpoint:
