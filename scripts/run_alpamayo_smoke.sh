@@ -67,7 +67,7 @@ fi
 EXPERIMENT="${EXPERIMENT:-alpamayo_1_5_local_2gpu_smoke}"
 REWARD="${REWARD:-progress_safety}"
 MODEL_PATH="${MODEL_PATH:-/mnt/mnt_m181/z59900495/workspace/model/Alpamayo-1.5-10B}"
-ALPASIM_EXTRA_OVERRIDES="${ALPASIM_EXTRA_OVERRIDES:-+cameras=${CAMERAS_PRESET} runtime.simulation_config.pose_reporting_interval_us=100000 scenes.local_usdz_dir=/mnt/mnt_m181/z59900495/workspace/DownloadTool-master/nvidia/PhysicalAI-Autonomous-Vehicles-NuRec wizard.runtime_server_port=5011}"
+ALPASIM_EXTRA_OVERRIDES="${ALPASIM_EXTRA_OVERRIDES:-+cameras=${CAMERAS_PRESET} runtime.simulation_config.pose_reporting_interval_us=100000 scenes.local_usdz_dir=/mnt/mnt_m181/z59900495/workspace/DownloadTool-master/nvidia/PhysicalAI-Autonomous-Vehicles-NuRec wizard.runtime_server_port=5011 topology=1gpu}"
 
 exec uv run --no-sync --all-packages python -m alpagym_host.cli \
   "experiment=${EXPERIMENT}" \
