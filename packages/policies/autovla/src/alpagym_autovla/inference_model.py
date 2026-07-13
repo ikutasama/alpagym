@@ -250,10 +250,12 @@ class AutoVLAInferenceModel:
         pil_images = []
         for i in range(num_cams):
             frame = camera_frames[i].cpu().numpy()
-            try:
-                pil_images.append(Image.fromarray(frame))
-            except (TypeError, KeyError):
+            if frame.ndim == 3 and frame.shape[0] in (1, 3, 4):
+                pil_images.append(Image.fromarray(frame.transpose(1, 2, 0)))
+            elif frame.ndim <= 1 or (frame.ndim >= 2 and min(frame.shape[:2]) <= 1):
                 pil_images.append(Image.open(io.BytesIO(frame.tobytes())))
+            else:
+                pil_images.append(Image.fromarray(frame))
 
         # Build velocity/acceleration from ego history
         if ego_history.shape[0] >= 2:

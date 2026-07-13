@@ -269,7 +269,11 @@ class EgodriverServer:
         # close_session callbacks, plus headroom for non-session RPCs
         # (start_session, submit_*, get_version).
         self._grpc_server = grpc.server(
-            futures.ThreadPoolExecutor(max_workers=2 * max_concurrent_rollouts + 2)
+            futures.ThreadPoolExecutor(max_workers=2 * max_concurrent_rollouts + 2),
+            options=[
+                ("grpc.max_send_message_length", 256 * 1024 * 1024),
+                ("grpc.max_receive_message_length", 256 * 1024 * 1024),
+            ],
         )
         add_EgodriverServiceServicer_to_server(self._servicer, self._grpc_server)
         bind_port = int(os.environ.get("ALPAGYM_DRIVER_PORT", "0"))

@@ -224,19 +224,19 @@ class AlpagymRollout(RolloutBase):
         # in-order await just preserves cosmos's ordered-return contract.
         payload_states = [self._worker.submit_payload(p) for p in payloads]
         # The streaming worker resolves permanent-failure payloads with `[]`
-        # (after `max_scene_retries` failed simulate attempts) instead of
-        # raising. Surface that as a hard error here so cosmos sees the
-        # failure at the rollout boundary rather than crashing downstream
-        # with a shape mismatch when fewer than `n_target` completions reach
-        # the advantage computation.
+        # (after `max_scene_retries` failed simulate attempts). Always emit
+        # one RolloutResult per payload so cosmos's one_step_generation sees
+        # a non-empty list; its _filter_valid_rollout_results_and_report then
+        # drops entries with empty completions without crashing.
         results: list[RolloutResult] = []
         for payload_state in payload_states:
             episodes = payload_state.future.result()
             if len(episodes) < payload_state.n_target:
-                raise RuntimeError(
-                    "Rollout payload exhausted retries: "
-                    f"prompt_idx={payload_state.payload.prompt_idx} "
-                    f"collected={len(episodes)}/{payload_state.n_target}"
+                logger.warning(
+                    "Partial rollout: prompt_idx=%s collected=%d/%d",
+                    payload_state.payload.prompt_idx,
+                    len(episodes),
+                    payload_state.n_target,
                 )
             results.append(RolloutResult(completions=list(episodes)))
         return results
