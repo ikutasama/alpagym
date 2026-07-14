@@ -106,6 +106,10 @@ def _build_cosmos_config(config: RunConfig) -> dict[str, Any]:
     train_policy["epsilon_high"] = train_policy.pop("grpo_ratio_clip_high")
     train_policy["mu_iterations"] = train_policy.pop("grpo_optimization_iterations")
     train["output_dir"] = str(artifact_paths.run_dir / "cosmos")
+    # Resume from the latest checkpoint only under autoresume: a requeue reuses
+    # run_dir, so cosmos-rl continues from the prior attempt's checkpoint. A
+    # normal run (including a rerun against the same run_dir) starts fresh.
+    train["resume"] = config.execution.slurm.autoresume
     # `non_text=True` avoids pickling large payloads by using threads not processes.
     train["non_text"] = True
     # ``BaseCosmosWrapper.parallelize_fn`` asserts compile is off.
@@ -125,10 +129,7 @@ def _build_cosmos_config(config: RunConfig) -> dict[str, Any]:
             "model_name_or_path": config.policy.model.path,
             **dict(cosmos["policy"]),
         },
-        "rollout": {
-            "backend": "alpagym_rollout",
-            **dict(cosmos["rollout"]),
-        },
+        "rollout": dict(cosmos["rollout"]),
         "logging": logging,
         "custom": {
             "resolved_config_path": str(artifact_paths.resolved_config_path),
@@ -150,7 +151,7 @@ def _extract_policy_model_tarball(tarball_path: Path, bundle_dir: Path) -> None:
 
 
 def is_supported_hf_bundle_dir(bundle_dir: Path) -> bool:
-    """Return whether a directory has the HF files the HF bundle loader can read."""
+    """Return whether a directory has supported HF model bundle files."""
     if not (bundle_dir / "config.json").is_file():
         return False
     if any(
@@ -165,7 +166,7 @@ def is_supported_hf_bundle_dir(bundle_dir: Path) -> bool:
 
 
 def _is_supported_hf_weight_filename(filename: str) -> bool:
-    """Return whether a filename matches the runtime HF bundle loader's weight globs."""
+    """Return whether a filename matches supported HF weight globs."""
     if filename in ("model.safetensors", "pytorch_model.bin"):
         return True
     return any(

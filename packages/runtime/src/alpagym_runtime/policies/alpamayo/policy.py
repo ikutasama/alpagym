@@ -193,8 +193,7 @@ class AlpamayoPolicy:
             latest_world_rot.T @ (history_world_xyz - latest_world_xyz).unsqueeze(-1)
         ).squeeze(-1)
         history_rig_rot = latest_world_rot.T @ history_world_rot
-        # Keep ego history fp32; the action_space CPU cholesky has no bf16
-        # kernel.
+        # Keep ego history fp32; CPU action-space math has no bf16 cholesky kernel.
         return (
             history_rig_xyz.unsqueeze(0).to(device=self._device, dtype=torch.float32),
             history_rig_rot.unsqueeze(0).to(device=self._device, dtype=torch.float32),

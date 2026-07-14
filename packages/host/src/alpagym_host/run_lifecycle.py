@@ -4,9 +4,11 @@
 import logging
 import os
 import shutil
+import signal
 import subprocess
 from contextlib import nullcontext
 from pathlib import Path
+from types import FrameType
 from typing import cast
 
 import grpc
@@ -81,6 +83,15 @@ def validate_local_process_config(execution_backend: ExecutionBackend) -> None:
         ) from exc
 
 
+class _AutoresumeTimeout(Exception):
+    """Raised from the pre-timeout SIGUSR1 handler to unwind the run for a requeue."""
+
+
+def _raise_autoresume_timeout(signum: int, frame: FrameType | None) -> None:
+    """Turn the pre-timeout SIGUSR1 into an exception so the run tears down cleanly."""
+    raise _AutoresumeTimeout
+
+
 def execute_run(config: RunConfig) -> None:
     """Execute a run through the shared local and Slurm lifecycle.
 
@@ -93,6 +104,9 @@ def execute_run(config: RunConfig) -> None:
     - ``ALPAGYM_COSMOS_ONLY=1``: skip Wizard startup and run the Cosmos
       launcher directly, using the pre-existing topology registry and
       scene id files from the copied run directory.
+
+    With ``execution.slurm.autoresume``, a pre-timeout SIGUSR1 tears the run
+    down and requeues the job, which then resumes from the latest checkpoint.
     """
     execution_backend = ExecutionBackend(config.execution.backend)
     wizard_only = os.environ.get("ALPAGYM_WIZARD_ONLY") == "1"
@@ -101,6 +115,12 @@ def execute_run(config: RunConfig) -> None:
         raise ValueError("Cannot set both ALPAGYM_WIZARD_ONLY and ALPAGYM_COSMOS_ONLY")
     if not cosmos_only:
         validate_local_process_config(execution_backend)
+    autoresume = execution_backend.is_slurm_run and config.execution.slurm.autoresume
+    # Install the handler before the try so a SIGUSR1 arriving during Slurm setup
+    # (allocation, image import) still unwinds into the requeue path below rather
+    # than killing the process with the default action.
+    if autoresume:
+        signal.signal(signal.SIGUSR1, _raise_autoresume_timeout)
     scene_selector = (
         f"{len(config.dataset.scene_ids)} scene ids"
         if config.dataset.scene_ids is not None
@@ -147,11 +167,16 @@ def execute_run(config: RunConfig) -> None:
         resolve_alpasim_checkout(config=config.alpasim) if not cosmos_only else None
     )
     registry = FileTopologyRegistry(config.artifact_paths.topology_registry_dir)
+    if autoresume and not cosmos_only:
+        # A requeue reuses the run dir; reset the prior attempt's AlPaSim
+        # rendezvous so this attempt rebuilds it. Normal launches keep the
+        # fail-fast exclusive publish on an accidentally reused run dir.
+        registry.reset_alpasim_topology()
     wizard_processes: list[subprocess.Popen[str]] = []
-    alpasim_hosts = topology.alpasim_host_plans
+    requeue_for_autoresume = False
     try:
         if not cosmos_only:
-            logging.info("Starting %d AlpaSim Wizard process(es)", len(alpasim_hosts))
+            logging.info("Starting %d AlPaSim Wizard process(es)", len(alpasim_hosts))
             for runtime_index, host in enumerate(alpasim_hosts):
                 wizard_processes.append(
                     _start_wizard_process(
@@ -250,11 +275,19 @@ def execute_run(config: RunConfig) -> None:
                     text=True,
                 )
             logging.info("Cosmos launcher completed")
+    except _AutoresumeTimeout:
+        requeue_for_autoresume = True
+        logging.info("Pre-timeout SIGUSR1 received; tearing down to requeue the Slurm job")
     finally:
         if wizard_processes:
             logging.info("Stopping %d AlpaSim Wizard process(es)", len(wizard_processes))
         for process in wizard_processes:
             ensure_process_terminated(process)
+
+    if requeue_for_autoresume:
+        job_id = os.environ["SLURM_JOB_ID"]
+        logging.info("Requeuing Slurm job %s for autoresume", job_id)
+        subprocess.run(["scontrol", "requeue", job_id], check=True, text=True)
 
 
 def _print_wizard_only_banner(
@@ -442,25 +475,31 @@ def _build_cosmos_launcher_command(
     command = ["uv", "run"]
     if no_sync:
         command.append("--no-sync")
+    else:
+        command.append("--all-packages")
     launcher_args = [
         "--project",
         str(project_root),
-        "--package",
-        "alpagym-runtime",
-        "python",
-        "-m",
-        "cosmos_rl.launcher.launch_all",
-        "--config",
-        str(config.artifact_paths.cosmos_config_path),
-        "--policy",
-        str(config.cosmos.launch.policy_replicas),
-        "--rollout",
-        str(config.cosmos.launch.rollout_replicas),
-        "--num-workers",
-        str(worker_count),
-        "--worker-idx",
-        str(worker_index),
     ]
+    if no_sync:
+        launcher_args.extend(["--package", "alpagym-runtime"])
+    launcher_args.extend(
+        [
+            "python",
+            "-m",
+            "cosmos_rl.launcher.launch_all",
+            "--config",
+            str(config.artifact_paths.cosmos_config_path),
+            "--policy",
+            str(config.cosmos.launch.policy_replicas),
+            "--rollout",
+            str(config.cosmos.launch.rollout_replicas),
+            "--num-workers",
+            str(worker_count),
+            "--worker-idx",
+            str(worker_index),
+        ]
+    )
     if controller_port is not None:
         launcher_args.extend(["--port", str(controller_port)])
     if controller_url is not None:

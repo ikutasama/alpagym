@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Quick NCCL peer-to-peer (GPU-to-GPU) sanity check.
 
 AlpaGym's policy and rollout replicas live on separate GPUs and exchange

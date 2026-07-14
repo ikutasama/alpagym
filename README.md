@@ -85,7 +85,7 @@ workspace is designed to make adding new packages straightforward.
 - **`packages/policies`** — the driving policies. Currently the Alpamayo 1.5
   policy bundle, configs, tokenizer, and checkpoint conversion script.
 - **`packages/alpasim_configs`** — AlpaSim topology configs used by AlpaGym.
-- **`packages/plugins`** — utilities for discovering optioninal plugin packages.
+- **`packages/plugins`** — utilities for discovering optional plugin packages.
 
 ### End-to-End Run Flow
 
@@ -119,3 +119,19 @@ cluster.
 - [Alpamayo 1.5 two-GPU server runbook](docs/SERVER_ALPAMAYO15_CLRL.md) - idempotent setup, preflight, smoke, and multi-step closed-loop RL commands.
 - [Onboarding Guide](docs/ONBOARDING.md) — host setup, auth, getting a model, and running locally.
 - [Contributing](CONTRIBUTING.md) — code style and review process.
+
+## Project Contributors:
+
+Contributors in each topic in alphabetical order
+
+**Project Lead:** Yuxiao Chen, Maximilian Igl
+
+**Core contributors:** Bertrand Douillard, Peter Karkus, Alex Nauman, Jef Packer, Thomas Tian
+
+**Contributors:** Jesse Archer​, William Lew​, Jack Shi, Michael Watson
+
+**Senior Mgmt:** Nat Duca, Boris Ivanovic, Marco Pavone
+
+**Production support:** Matt Cragun, Aditya Mahajan, Selena Williams
+
+**Acknowledgements for additional contributions:** Liang Feng, Aaron Smith

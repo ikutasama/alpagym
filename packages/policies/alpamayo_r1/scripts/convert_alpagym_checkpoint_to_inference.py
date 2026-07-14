@@ -37,8 +37,9 @@ import json
 import shutil
 from pathlib import Path
 
-from alpamayo.utils.checkpoint_utils import collect_targets, prepare_output_dir, remap_targets
 from safetensors.torch import load_file, save_file
+
+from alpamayo.utils.checkpoint_utils import collect_targets, prepare_output_dir, remap_targets
 
 # Inverse of the forward script's TARGET_REMAP, mapping the RL ``_target_``
 # paths back to the inference ``alpamayo1_5`` modules. ``remap_target`` uses the

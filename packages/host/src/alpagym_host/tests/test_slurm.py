@@ -477,6 +477,58 @@ def test_render_submit_script_accepts_multi_node_slurm_config(tmp_path: Path) ->
     assert "topology=slurm_distributed_1_2_2" in script
 
 
+def test_render_submit_script_enables_autoresume_signal_and_requeue(tmp_path: Path) -> None:
+    """Autoresume adds the pre-timeout signal and requeue directives and execs the CLI."""
+    artifact_paths = _artifact_paths(tmp_path / "run")
+    slurm = _slurm_config(
+        partition="batch",
+        account="research",
+        container_image="/containers/alpagym.sqsh",
+        autoresume=True,
+    )
+
+    script = render_submit_script(
+        execution_config=ExecutionConfig(
+            backend=ExecutionBackend.slurm,
+            resolved_config_path=None,
+            slurm=slurm,
+        ),
+        artifact_paths=artifact_paths,
+        project_root=Path("/repo/projects/alpagym"),
+        deploy="iad",
+        topology="slurm_full_node_1_3_4",
+    )
+
+    assert "#SBATCH --signal=B:SIGUSR1@120" in script
+    assert "#SBATCH --requeue" in script
+    # Append so a requeue (same job id) keeps the prior attempt's host log.
+    assert "#SBATCH --open-mode=append" in script
+    # exec lets Slurm's signal reach the host CLI (the requeue handler).
+    assert "exec uv run" in script
+
+
+def test_render_submit_script_omits_autoresume_directives_when_disabled(tmp_path: Path) -> None:
+    """Without autoresume the script carries no signal or requeue directives."""
+    script = render_submit_script(
+        execution_config=ExecutionConfig(
+            backend=ExecutionBackend.slurm,
+            resolved_config_path=None,
+            slurm=_slurm_config(
+                partition="batch",
+                account="research",
+                container_image="/containers/alpagym.sqsh",
+            ),
+        ),
+        artifact_paths=_artifact_paths(tmp_path / "run"),
+        project_root=Path("/repo/projects/alpagym"),
+        deploy="iad",
+        topology="slurm_full_node_1_3_4",
+    )
+
+    assert "SIGUSR1" not in script
+    assert "--requeue" not in script
+
+
 def test_cosmos_srun_command_disables_cpu_binding_for_nonexclusive_steps(
     tmp_path: Path,
 ) -> None:
@@ -694,6 +746,7 @@ def _slurm_config(
     nodes: int = 1,
     topology: AllInOneSlurmTopologyConfig | SeparateNodesSlurmTopologyConfig | None = None,
     mem: str | None = None,
+    autoresume: bool = False,
 ) -> SlurmConfig:
     """Build a Slurm config for tests."""
     return SlurmConfig(
@@ -715,6 +768,7 @@ def _slurm_config(
         else [f"{uv_cache_dir}:{uv_cache_dir}"],
         export_env=export_env if export_env is not None else [f"UV_CACHE_DIR={uv_cache_dir}"],
         mem=mem,
+        autoresume=autoresume,
     )
 
 

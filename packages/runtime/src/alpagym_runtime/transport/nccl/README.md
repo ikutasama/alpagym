@@ -433,7 +433,12 @@ up to a bounded timeout, then raises `TimeoutError` rather than letting the broa
 communicator over a still-in-flight data send. Held payloads — registered tensors awaiting a
 receiver request, which run no NCCL op — are left in place and ship after the broadcast; waiting on
 them would stall the flush against the off-policy buffer, which fills with rollouts the policy will
-not request until later steps.
+not request until later steps. Leaving them in place is safe because no held payload can be *claimed*
+mid-broadcast: a payload moves from held to claimed only when the policy publishes a receive request,
+and the policy issues those requests only synchronously inside `get_policy_input` (no background
+prefetch — see the P2R guard below). During the weight-sync phase that R2R belongs to, the policy is
+past `get_policy_input`, so no request is outstanding and the background sender loop has nothing to
+claim.
 
 The P2R path has a separate guard. The policy-side NCCL packer resolves `nccl:` handles
 synchronously inside `get_policy_input`, before the train step completes and before the dispatcher

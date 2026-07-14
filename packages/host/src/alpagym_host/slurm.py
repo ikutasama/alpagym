@@ -507,6 +507,13 @@ def render_submit_script(
         headers.append(f"#SBATCH --mem={slurm.mem}")
     if slurm.exclusive:
         headers.append("#SBATCH --exclusive")
+    if slurm.autoresume:
+        # SIGUSR1 120s before the time limit triggers the requeue in execute_run;
+        # --requeue allows it; --open-mode=append keeps the prior attempt's log
+        # (a requeue reuses the same job id, so default truncate would clobber it).
+        headers.append("#SBATCH --signal=B:SIGUSR1@120")
+        headers.append("#SBATCH --requeue")
+        headers.append("#SBATCH --open-mode=append")
 
     command = [
         "uv",
@@ -530,7 +537,9 @@ def render_submit_script(
             "set -euo pipefail",
             f"export UV_CACHE_DIR={shlex.quote(cast(str, slurm.uv_cache_dir))}",
             f"cd {shlex.quote(str(project_root))}",
-            shlex.join(command),
+            # exec so Slurm's pre-timeout SIGUSR1 (sent to the batch shell)
+            # reaches the host CLI for autoresume.
+            f"exec {shlex.join(command)}",
             "",
         ]
     )

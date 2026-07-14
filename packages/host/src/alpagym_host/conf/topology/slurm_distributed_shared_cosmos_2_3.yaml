@@ -2,9 +2,7 @@
 
 defaults:
   - /execution/slurm/topology@execution.slurm.topology: separate_nodes
-  # Disk transport avoids NCCL rollout artifact sends sharing R2R channels with
-  # rollout-to-rollout weight sync while episode sends may still be in flight.
-  - override /transport: disk
+  - override /transport: nccl
   - _self_
 
 # Five 8-GPU nodes rebalanced toward AlpaSim: two Cosmos nodes shared by policy
@@ -28,7 +26,6 @@ execution:
   backend: slurm
   slurm:
     nodes: 5
-    qos: av_alpamayo_reasoning_high
     topology:
       cosmos_nodes: 2
       alpasim_nodes: 3
@@ -36,7 +33,7 @@ execution:
 alpasim:
   wizard_args:
     topology: alpagym_8gpu
-    extra_overrides: "+cameras=4cam_1080 runtime.simulation_config.control_timestep_us=200000 runtime.simulation_config.n_sim_steps=30 runtime.simulation_config.pose_reporting_interval_us=100000 runtime.simulation_config.force_gt_duration_us=1600000"
+    extra_overrides: "runtime.simulation_config.control_timestep_us=200000 runtime.simulation_config.n_sim_steps=30 runtime.simulation_config.pose_reporting_interval_us=100000 runtime.simulation_config.force_gt_duration_us=1600000"
 
 # n_sim_steps=30 with the 1.6s GT prefix emits 22 trainer replay rows. MR-2266
 # trains those as step-level samples; mini_batch=1 keeps each forward memory-bounded.

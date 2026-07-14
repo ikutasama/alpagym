@@ -231,7 +231,7 @@ def test_disk_round_trip_restores_model_input_uint8_via_from_payload(tmp_path: P
     The disk transport flattens tensor leaves to plain lists (dtype dropped). The
     trainer recovers the dtypes by calling ``ModelInput.from_payload`` on the read-back
     payload (the same seam ``get_policy_input`` uses). This pins that round-trip for a
-    non-float field -- uint8 ``camera_frames`` -- which the packer tests obscure by
+    non-float field -- uint8 ``camera_frames`` -- which replay packer tests obscure by
     normalizing ``image_frames`` to float32.
     """
     model_input = ModelInput(
