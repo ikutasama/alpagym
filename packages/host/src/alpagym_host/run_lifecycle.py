@@ -172,6 +172,7 @@ def execute_run(config: RunConfig) -> None:
         # rendezvous so this attempt rebuilds it. Normal launches keep the
         # fail-fast exclusive publish on an accidentally reused run dir.
         registry.reset_alpasim_topology()
+    alpasim_hosts = topology.alpasim_host_plans
     wizard_processes: list[subprocess.Popen[str]] = []
     requeue_for_autoresume = False
     try:
