@@ -113,9 +113,10 @@ class AutoVLAInferenceModel:
         all_pred_rot = []
         all_logprobs = []
         all_action_token_ids = []
+        all_completion_ids = []
 
         for batch_idx in range(batch_size):
-            pred_xyz, pred_rot, logprob, action_token_ids = self._infer_single(
+            pred_xyz, pred_rot, logprob, action_token_ids, completion_ids = self._infer_single(
                 model_input, batch_idx, sampling, return_trace_for_rl
             )
             all_pred_xyz.append(pred_xyz)
@@ -124,6 +125,8 @@ class AutoVLAInferenceModel:
                 all_logprobs.append(logprob)
             if action_token_ids is not None:
                 all_action_token_ids.append(action_token_ids)
+            if completion_ids is not None:
+                all_completion_ids.append(completion_ids)
 
         pred_xyz = torch.stack(all_pred_xyz, dim=0)  # [B, S, K, T, 3]
         pred_rot = torch.stack(all_pred_rot, dim=0)  # [B, S, K, T, 3, 3]
@@ -131,6 +134,10 @@ class AutoVLAInferenceModel:
         extra: dict[str, Any] = {}
         if all_action_token_ids:
             extra["action_token_ids"] = torch.stack(all_action_token_ids, dim=0)  # [B, S, K, T]
+        if all_completion_ids:
+            extra["completion_ids"] = torch.nn.utils.rnn.pad_sequence(
+                all_completion_ids, batch_first=True, padding_value=0
+            )
 
         return BatchedModelOutput(
             pred_xyz=pred_xyz,
@@ -145,7 +152,7 @@ class AutoVLAInferenceModel:
         batch_idx: int,
         sampling: SamplingParamsConfig,
         return_trace_for_rl: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         """Process one batch row: build prompt, generate, decode trajectory.
 
         Returns AlPaGym candidate axes for one batch row:
@@ -172,6 +179,11 @@ class AutoVLAInferenceModel:
             "top_p": sampling.top_p if sampling.top_p else 1.0,
         }
 
+        seed = model_input.seed
+        if seed is not None:
+            seed_val = int(seed[batch_idx].item()) if seed.dim() > 0 else int(seed.item())
+            torch.manual_seed(seed_val)
+
         with torch.no_grad():
             prompt_completion_ids = self._vlm.generate(
                 **model_inputs,
@@ -182,13 +194,18 @@ class AutoVLAInferenceModel:
         completion_ids = prompt_completion_ids[:, prompt_length:]
 
         # 3. Extract action tokens
+        # Remove trailing EOS token (same as original AutoVLA predict())
+        if completion_ids.shape[1] > 0:
+            eos_id = self._processor.tokenizer.eos_token_id
+            if completion_ids[0, -1].item() == eos_id:
+                completion_ids = completion_ids[:, :-1]
+
         action_tokens = completion_ids[0][completion_ids[0] >= self._action_start_id]
         if len(action_tokens) > self._num_poses:
             action_tokens = action_tokens[:self._num_poses]
         elif len(action_tokens) < self._num_poses:
-            pad = torch.full(
-                (self._num_poses - len(action_tokens),),
-                self._action_start_id,
+            pad = torch.zeros(
+                self._num_poses - len(action_tokens),
                 dtype=action_tokens.dtype,
                 device=action_tokens.device,
             )
@@ -207,6 +224,25 @@ class AutoVLAInferenceModel:
         pred_xyz[:, 1] = traj[:, 1]  # y
         pred_xyz[:, 2] = 0.0         # z = 0 (2D planning)
 
+        if hasattr(self, '_log_counter'):
+            self._log_counter += 1
+        else:
+            self._log_counter = 0
+        if self._log_counter <= 5 or self._log_counter % 20 == 0:
+            n_action = (completion_ids[0] >= self._action_start_id).sum().item()
+            logger.info(
+                "AutoVLA decode: completion_len=%d n_action_tokens=%d "
+                "action_tokens_raw=%s action_indices=%s "
+                "traj_first3=%s traj_last3=%s pred_xyz_first3=%s",
+                completion_ids.shape[1],
+                n_action,
+                action_tokens.tolist()[:5],
+                [int(t.item() - self._action_start_id) if t.item() >= self._action_start_id else -1 for t in action_tokens[:5]],
+                [[f"{v:.4f}" for v in row] for row in trajectory[:3].tolist()],
+                [[f"{v:.4f}" for v in row] for row in trajectory[-3:].tolist()],
+                [[f"{v:.4f}" for v in row] for row in pred_xyz[:3].tolist()],
+            )
+
         # pred_rot: [T, 3, 3] — yaw-only rotation matrix
         pred_rot = heading_to_rotation_matrix(traj[:, 2])
 
@@ -217,13 +253,15 @@ class AutoVLAInferenceModel:
         # 6. Compute logprob if needed for RL
         logprob = None
         action_token_ids_out = None
+        completion_ids_out = None
         if return_trace_for_rl:
             logprob = self._compute_logprob(
                 model_inputs, prompt_completion_ids, prompt_length
             ).reshape(1, 1)
             action_token_ids_out = action_tokens.reshape(1, 1, -1).to(torch.int64).cpu()
+            completion_ids_out = completion_ids[0].cpu()
 
-        return pred_xyz, pred_rot, logprob, action_token_ids_out
+        return pred_xyz, pred_rot, logprob, action_token_ids_out, completion_ids_out
 
     def _build_qwen_inputs(
         self,
@@ -452,13 +490,11 @@ class AutoVLAInferenceModel:
     ) -> torch.Tensor:
         """Compute sum of per-token logprobs for the generated action tokens.
 
-        Simple case: AutoVLA uses discrete LLM softmax, so logprob =
-        sum of per-token log-probs from the model's logits.
+        Only action tokens (>= action_start_id) in the completion are summed,
+        matching the trainer-side _compute_action_logprobs which also only
+        scores action tokens.
         """
         with torch.no_grad():
-            # Forward pass to get logits.  Reuse all processor-produced vision
-            # tensors (image/video pixel values + grid metadata) and replace only
-            # the token sequence with the full prompt+completion IDs.
             forward_kwargs = {
                 key: value
                 for key, value in model_inputs.items()
@@ -471,19 +507,22 @@ class AutoVLAInferenceModel:
             )
             logits = outputs.logits  # (1, L, V)
 
-        # Shift for next-token prediction
         logits = logits[:, :-1, :]  # (1, L-1, V)
         target_ids = prompt_completion_ids[:, 1:]  # (1, L-1)
 
-        # Compute log probs
         log_probs = torch.log_softmax(logits, dim=-1)  # (1, L-1, V)
         per_token_logps = log_probs.gather(2, target_ids.unsqueeze(-1)).squeeze(-1)  # (1, L-1)
 
-        # Sum only action token logprobs (completion part)
-        completion_logps = per_token_logps[:, prompt_length - 1:]
-        logprob = completion_logps.sum(dim=-1)  # (1,)
+        completion_ids = target_ids[:, prompt_length - 1:]  # (1, completion_len)
+        completion_logps = per_token_logps[:, prompt_length - 1:]  # (1, completion_len)
 
-        return logprob.squeeze(0)  # scalar
+        action_mask = completion_ids >= self._action_start_id  # (1, completion_len)
+        if action_mask.any():
+            logprob = completion_logps[action_mask].sum()
+        else:
+            logprob = completion_logps.sum(dim=-1).squeeze(0)
+
+        return logprob.squeeze() if logprob.dim() > 0 else logprob
 
     def build_policy_replay_data(
         self,
@@ -504,6 +543,17 @@ class AutoVLAInferenceModel:
         selected_action_token_ids = model_output.extra["action_token_ids"][
             action_selection.set_ix, action_selection.sample_ix
         ]
+        payload: dict[str, Any] = {
+            "model_input": asdict(model_input),
+            "action_token_ids": torch.as_tensor(selected_action_token_ids, dtype=torch.int64),
+        }
+        if "completion_ids" in model_output.extra:
+            comp = model_output.extra["completion_ids"]
+            # completion_ids shape: [B, T] (from pad_sequence)
+            # action_selection.set_ix and sample_ix are always 0 for S=K=1
+            batch_idx = 0
+            selected_completion_ids = comp[batch_idx]
+            payload["completion_ids"] = torch.as_tensor(selected_completion_ids, dtype=torch.int64)
         return PolicyReplayData(
             replay_schema_version=1,
             payload_schema="autovla.action_tokens.v1",
@@ -511,10 +561,7 @@ class AutoVLAInferenceModel:
             model_family="autovla",
             action_selection=action_selection,
             old_logprob=torch.as_tensor(old_logprob, dtype=torch.float32).reshape(()),
-            payload={
-                "model_input": asdict(model_input),
-                "action_token_ids": torch.as_tensor(selected_action_token_ids, dtype=torch.int64),
-            },
+            payload=payload,
         )
 
     @staticmethod
@@ -561,6 +608,8 @@ class AutoVLAInferenceModel:
             "route_xy": model_input.route_xy,
             "action_token_ids": torch.as_tensor(payload["action_token_ids"], dtype=torch.int64),
         }
+        if "completion_ids" in payload:
+            model_inputs["completion_ids"] = torch.as_tensor(payload["completion_ids"], dtype=torch.int64)
         if replay_data.old_logprob is None:
             raise ValueError("autovla replay requires old_logprob")
         old_logprob = torch.as_tensor(replay_data.old_logprob, dtype=torch.float32).reshape(())

@@ -210,14 +210,28 @@ def _compute_action_logprobs(
     qwen_model: Any,
     model_inputs: dict[str, torch.Tensor],
     action_token_ids: torch.Tensor,
+    completion_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Forward prompt + action tokens and compute sum log-prob for the action part."""
+    """Forward prompt + completion and compute sum log-prob for the action part.
+
+    If ``completion_ids`` is provided (the full generated completion including
+    assistant prefix and any intermediate text), it is appended to the prompt
+    so the model sees the same context as during rollout.  Only tokens with
+    IDs >= action_start_id contribute to the sum, matching the rollout-side
+    ``_compute_logprob``.
+
+    If ``completion_ids`` is not available, falls back to appending only
+    ``action_token_ids`` (less accurate for CoT models).
+    """
     prompt_ids = model_inputs["input_ids"]  # [1, prompt_len]
     prompt_length = prompt_ids.shape[1]
 
-    # Append action tokens to prompt
-    act_ids = action_token_ids.to(prompt_ids.dtype).to(prompt_ids.device)
-    prompt_completion_ids = torch.cat([prompt_ids, act_ids.unsqueeze(0)], dim=1)
+    if completion_ids is not None:
+        comp_ids = completion_ids.to(prompt_ids.dtype).to(prompt_ids.device)
+        prompt_completion_ids = torch.cat([prompt_ids, comp_ids.unsqueeze(0)], dim=1)
+    else:
+        act_ids = action_token_ids.to(prompt_ids.dtype).to(prompt_ids.device)
+        prompt_completion_ids = torch.cat([prompt_ids, act_ids.unsqueeze(0)], dim=1)
 
     forward_kwargs = {
         k: v for k, v in model_inputs.items()
@@ -230,17 +244,23 @@ def _compute_action_logprobs(
     )
     logits = outputs.logits  # [1, L, V]
 
-    # Shift for next-token prediction
     logits = logits[:, :-1, :]  # [1, L-1, V]
     target_ids = prompt_completion_ids[:, 1:]  # [1, L-1]
 
     log_probs = torch.log_softmax(logits, dim=-1)  # [1, L-1, V]
     per_token_logps = log_probs.gather(2, target_ids.unsqueeze(-1)).squeeze(-1)  # [1, L-1]
 
-    # Sum only action token logprobs (completion part)
+    completion_part_ids = target_ids[:, prompt_length - 1:]
     completion_logps = per_token_logps[:, prompt_length - 1:]
-    logprob = completion_logps.sum(dim=-1)  # [1]
-    return logprob.squeeze(0)  # scalar
+
+    action_start_id = _trainer_config.get("action_start_id", 151665)
+    action_mask = completion_part_ids >= action_start_id
+    if action_mask.any():
+        logprob = completion_logps[action_mask].sum()
+    else:
+        logprob = completion_logps.sum(dim=-1).squeeze(0)
+
+    return logprob.squeeze() if logprob.dim() > 0 else logprob
 
 
 def autovla_training_forward(
@@ -255,17 +275,18 @@ def autovla_training_forward(
     ego_history_xyz = model_inputs["ego_history_xyz"]
     route_xy = model_inputs.get("route_xy")
     action_token_ids = model_inputs.get("action_token_ids")
+    completion_ids = model_inputs.get("completion_ids")
 
     logger.info(
         "AutoVLA training forward shapes: camera_frames=%s dtype=%s, "
-        "ego_history_xyz=%s, route_xy=%s, action_token_ids=%s",
+        "ego_history_xyz=%s, route_xy=%s, action_token_ids=%s, completion_ids=%s",
         tuple(camera_frames.shape), camera_frames.dtype,
         tuple(ego_history_xyz.shape),
         tuple(route_xy.shape) if route_xy is not None else None,
         tuple(action_token_ids.shape) if action_token_ids is not None else None,
+        tuple(completion_ids.shape) if completion_ids is not None else None,
     )
 
-    # Ensure batch dim
     if camera_frames.dim() == 4:
         camera_frames = camera_frames.unsqueeze(0)
     if ego_history_xyz.dim() == 2:
@@ -274,6 +295,8 @@ def autovla_training_forward(
         route_xy = route_xy.unsqueeze(0)
     if action_token_ids is not None and action_token_ids.dim() == 1:
         action_token_ids = action_token_ids.unsqueeze(0)
+    if completion_ids is not None and completion_ids.dim() == 1:
+        completion_ids = completion_ids.unsqueeze(0)
 
     batch_size = camera_frames.shape[0]
     qwen_model = _find_qwen_model(trainer.model)
@@ -290,9 +313,9 @@ def autovla_training_forward(
         if action_token_ids is not None:
             logprob = _compute_action_logprobs(
                 qwen_model, qwen_inputs, action_token_ids[b],
+                completion_ids[b] if completion_ids is not None else None,
             )
         else:
-            # No action tokens — shouldn't happen in RL training
             logprob = torch.tensor(0.0, device=device)
         all_logprobs.append(logprob)
 

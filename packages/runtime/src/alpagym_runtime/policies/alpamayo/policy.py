@@ -60,7 +60,7 @@ class AlpamayoPolicy:
     def step(self, policy_input: PolicyInput) -> PolicyOutput:
         """Run one drive tick: preprocess, infer, postprocess."""
         seed: torch.Tensor | None = None
-        if self._config.inference.sampling.force_determinism:
+        if self._session_seed is not None:
             session_seed = int(self._session_seed)
             seed = torch.tensor(
                 session_seed + self._inference_step_counter,
@@ -328,6 +328,15 @@ class AlpamayoPolicy:
             ego_pose_at_choice=ego_pose_at_choice,
             future_dt_us=future_dt_us,
         )
+        if self._valid_output_count <= 3 or self._valid_output_count % 10 == 0:
+            logger.info(
+                "AlpamayoPolicy session=%s step=%d pred_xyz_ego_first3=%s pred_xyz_ego_last3=%s dt_us=%s",
+                self._session_uuid,
+                self._valid_output_count,
+                chosen_traj.xyz[:3].tolist(),
+                chosen_traj.xyz[-3:].tolist(),
+                future_dt_us[:3].tolist(),
+            )
         self._buffers.update_last_chosen_traj(chosen_traj)
         output_xyz, output_quat, output_dt_us = build_policy_output_trajectory(
             ego_pose_now=ego_pose_at_choice,

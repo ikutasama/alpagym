@@ -56,8 +56,6 @@ class AlpagymRollout(RolloutBase):
             self._run_config.artifact_paths.topology_registry_dir
         )
         self._model_param_map = None
-        # Components built lazily in `init_engine`. None sentinels so
-        # `shutdown` no-ops cleanly on a partial init failure.
         self._inference_engine: InferenceEngine | None = None
         self._driver_server: EgodriverServer | None = None
         self._alpasim_runtime_stub: RuntimeServiceStub | None = None
@@ -65,6 +63,7 @@ class AlpagymRollout(RolloutBase):
         self._engine_thread: threading.Thread | None = None
         self._engine_initialized = False
         self._shutdown_done = False
+        self._is_dp_rank_zero = True
 
     @measure_perf("rollout/engine_init", category="orchestration", cpu_snapshot=True)
     def init_engine(
@@ -78,6 +77,19 @@ class AlpagymRollout(RolloutBase):
         del quantization, seed, load_format, kwargs
 
         if self._engine_initialized:
+            return
+
+        try:
+            if torch.distributed.is_initialized():
+                self._is_dp_rank_zero = torch.distributed.get_rank() == 0
+        except Exception:
+            pass
+
+        if not self._is_dp_rank_zero:
+            logger.info("[alpagym] Initializing inference engine only on non-zero DP rank (no driver/AlPaSim)")
+            self._inference_engine = build_inference_engine(self._run_config)
+            self._model = self._inference_engine.get_model()
+            self._engine_initialized = True
             return
 
         rollouts_per_payload = int(self._run_config.cosmos.rollout.n_generation)
@@ -213,6 +225,8 @@ class AlpagymRollout(RolloutBase):
         # new Cosmos kwarg surfaces as a loud TypeError instead of being
         # silently absorbed.
         del stream, data_fetcher, current_weight_version, data_packer
+        if not self._is_dp_rank_zero:
+            return [RolloutResult(completions=[]) for _ in payloads]
         if self._worker is None:
             raise RuntimeError("rollout_generation called before init_engine")
         logger.info(

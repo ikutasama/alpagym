@@ -48,9 +48,11 @@ def install_autovla_runtime_bridge() -> None:
             "using built-in model."
         )
 
-    # Patch trainer forward to handle AutoVLA raw inputs
     from alpagym_autovla.autovla_trainer_forward import patch_trainer_forward
     patch_trainer_forward()
+
+    from alpagym_autovla.cosmos_bridge import patch_cosmos_qwen_model_for_autovla
+    patch_cosmos_qwen_model_for_autovla(sft_checkpoint_path=None)
 
 
 def setup_tokenizer(config: Any) -> Any | None:
@@ -70,7 +72,6 @@ def build_data_packer(run_config: Any, cosmos_role: str | None) -> Any:
 
     install_autovla_runtime_bridge()
 
-    # Ensure trainer config is set (in case setup_tokenizer wasn't called yet)
     from alpagym_autovla.autovla_trainer_forward import set_trainer_config, _trainer_config
     if not _trainer_config:
         from pathlib import Path
@@ -85,6 +86,13 @@ def build_data_packer(run_config: Any, cosmos_role: str | None) -> Any:
             num_poses=bc.get("trajectory", {}).get("num_poses", 10),
             use_cot=bc.get("use_cot", False),
         )
+
+    # Set SFT checkpoint path so the policy model can load it
+    from alpagym_autovla.cosmos_bridge import patch_cosmos_qwen_model_for_autovla
+    bc = run_config.policy.model.bundle_config
+    ckpt_path = bc.get("checkpoint_path")
+    if ckpt_path:
+        patch_cosmos_qwen_model_for_autovla(sft_checkpoint_path=ckpt_path)
 
     return build_alpagym_data_packer(
         run_config=run_config,
@@ -168,7 +176,21 @@ def load_inference_model(
                 k = k[len("autovla."):]
             if k.startswith("vlm."):
                 k = k[len("vlm."):]
+            # SFT checkpoint uses model.layers.*, model.embed_tokens.*, visual.*
+            # but Qwen2_5_VLForConditionalGeneration uses
+            # model.language_model.layers.*, model.language_model.embed_tokens.*,
+            # model.visual.*
+            if k.startswith("model.layers."):
+                k = "model.language_model." + k[len("model."):]
+            elif k.startswith("model.embed_tokens") or k.startswith("model.norm"):
+                k = "model.language_model." + k[len("model."):]
+            elif k.startswith("visual."):
+                k = "model." + k
             new_state[k] = v
+        # SFT checkpoint has extended vocab (153713); resize before loading
+        sft_embed = new_state.get("model.language_model.embed_tokens.weight")
+        if sft_embed is not None and sft_embed.shape[0] > model._vlm.config.vocab_size:
+            model._vlm.resize_token_embeddings(sft_embed.shape[0])
         missing, unexpected = model._vlm.load_state_dict(new_state, strict=False)
         logger.info(
             "Loaded AutoVLA SFT checkpoint from %s "

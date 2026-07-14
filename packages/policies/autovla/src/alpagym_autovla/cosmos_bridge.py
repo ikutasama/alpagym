@@ -8,11 +8,14 @@ HFModelWeightMapper silently skips.
 
 from __future__ import annotations
 
+import logging
 import torch
 from cosmos_rl.policy.model.base import BaseModel
 from cosmos_rl.policy.model.hf_models.weight_mapper import HFModelWeightMapper
 from cosmos_rl.utils import util
 from transformers import AutoConfig, Qwen2_5_VLForConditionalGeneration
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -44,10 +47,8 @@ class Qwen2_5_VLWeightMapper(HFModelWeightMapper):
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
         """Map policy-side parameter names to HF checkpoint key-space."""
         name = util.clear_weight_name(name)
-        # visual.* (vision encoder, merger, patch_embed) are already canonical
         if name.startswith("visual."):
             return name
-        # model.*, lm_head.*  — delegate to base class
         return super().policy_map_local_key_to_hf_key(name)
 
     # -- Rollout side -------------------------------------------------------
@@ -55,7 +56,6 @@ class Qwen2_5_VLWeightMapper(HFModelWeightMapper):
     def rollout_map_local_key_to_hf_key(self, rollout_weight_name: str) -> str:
         """Map rollout-side parameter names to HF checkpoint key-space."""
         name = rollout_weight_name
-        # Strip common Cosmos/vLLM prefixes
         if name.startswith("model.vlm."):
             name = name.replace("model.vlm.", "", 1)
         elif name.startswith("vlm."):
@@ -64,7 +64,6 @@ class Qwen2_5_VLWeightMapper(HFModelWeightMapper):
             name = name.replace("llm.model.", "model.", 1)
         elif name.startswith("llm.lm_head."):
             name = name.replace("llm.lm_head.", "lm_head.", 1)
-        # visual.* pass-through
         if name.startswith("visual."):
             return name
         return self.policy_map_local_key_to_hf_key(name)
@@ -95,7 +94,7 @@ class Qwen2_5_VLWeightMapper(HFModelWeightMapper):
 
 
 # ---------------------------------------------------------------------------
-# BaseModel wrapper
+# BaseModel wrapper (fallback if built-in registration fails)
 # ---------------------------------------------------------------------------
 
 class Qwen2_5_VLBaseModel(BaseModel):
@@ -115,8 +114,6 @@ class Qwen2_5_VLBaseModel(BaseModel):
     def supported_model_types():
         return ["qwen2_5_vl"]
 
-    # -- Parallelism --------------------------------------------------------
-
     @property
     def parallelize_fn(self):
         """No-op parallelisation for single-GPU smoke tests."""
@@ -125,10 +122,7 @@ class Qwen2_5_VLBaseModel(BaseModel):
         return _noop, self
 
     def post_to_empty_hook(self, cosmos_config):
-        """No-op; load_hf_weights handles all weight restoration."""
         pass
-
-    # -- Weight loading -----------------------------------------------------
 
     def load_hf_weights(
         self,
@@ -141,11 +135,6 @@ class Qwen2_5_VLBaseModel(BaseModel):
         ckpt = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model_name_or_path, trust_remote_code=True
         ).to("cpu")
-        # Untie embeddings: FSDP skips shared (tied) parameters, which breaks
-        # cosmos-rl weight sync in disaggregated mode.  Always clone
-        # embed_tokens into lm_head so they are independent tensors that FSDP
-        # can shard and sync separately.  The cloned values are identical so
-        # model behaviour is unchanged.
         if hasattr(ckpt, "lm_head") and hasattr(ckpt.model, "embed_tokens"):
             ckpt.lm_head.weight = torch.nn.Parameter(
                 ckpt.model.embed_tokens.weight.data.clone()
@@ -155,8 +144,6 @@ class Qwen2_5_VLBaseModel(BaseModel):
         self.model.load_state_dict(state, strict=True)
         if device is not None:
             self.model = self.model.to(device)
-
-    # -- Forward ------------------------------------------------------------
 
     def get_position_ids(self, **kwargs):
         if "input_ids" in kwargs and kwargs["input_ids"] is not None:
@@ -206,3 +193,97 @@ class Qwen2_5_VLBaseModel(BaseModel):
             config.max_position_embeddings = max_position_embeddings
         config._name_or_path = model_name_or_path
         return cls(config)
+
+
+# ---------------------------------------------------------------------------
+# Built-in model patching for AutoVLA action tokens
+# ---------------------------------------------------------------------------
+
+def patch_cosmos_qwen_model_for_autovla(sft_checkpoint_path: str | None) -> None:
+    """Patch the built-in Cosmos-RL Qwen2.5-VL model to support AutoVLA action tokens.
+
+    The built-in ``Qwen2_5_VLConditionalModel`` does not resize its vocab for
+    AutoVLA's 2048 extra action tokens (IDs 151665-153712).  This patch wraps
+    ``load_hf_weights`` to resize embeddings and load the SFT checkpoint after
+    the base HF weights are loaded.
+    """
+    try:
+        from cosmos_rl.policy.model.qwen2_5_vl import Qwen2_5_VLConditionalModel
+    except ImportError:
+        return
+
+    if getattr(Qwen2_5_VLConditionalModel, "_autovla_patched", False):
+        if sft_checkpoint_path is not None:
+            Qwen2_5_VLConditionalModel._autovla_sft_checkpoint_path = sft_checkpoint_path
+        return
+
+    Qwen2_5_VLConditionalModel._autovla_sft_checkpoint_path = sft_checkpoint_path
+    original_load_hf_weights = Qwen2_5_VLConditionalModel.load_hf_weights
+
+    def patched_load_hf_weights(self, model_name_or_path, parallel_dims, device, revision=None):
+        original_load_hf_weights(self, model_name_or_path, parallel_dims, device, revision=revision)
+
+        action_start_id = 151665
+        n_bins = 2048
+        needed_vocab = action_start_id + n_bins
+        current_vocab = self.model.config.vocab_size
+        if current_vocab < needed_vocab:
+            old_embed = self.model.embed_tokens.weight.data
+            self.model.embed_tokens = torch.nn.Embedding(
+                needed_vocab, self.model.config.dim,
+                device=old_embed.device, dtype=old_embed.dtype,
+            )
+            self.model.embed_tokens.weight.data[:current_vocab] = old_embed
+            self.model.config.vocab_size = needed_vocab
+            self.vocab_size = needed_vocab
+            if hasattr(self, "hf_config"):
+                self.hf_config.vocab_size = needed_vocab
+            if hasattr(self, "weight_mapper") and hasattr(self.weight_mapper, "config"):
+                self.weight_mapper.config.vocab_size = needed_vocab
+            if hasattr(self.model, "lm_head") and not self.model.tie_embed_tokens:
+                old_lm_head = self.model.lm_head.weight.data
+                self.model.lm_head = torch.nn.Linear(
+                    self.model.config.dim, needed_vocab, bias=False,
+                    device=old_lm_head.device, dtype=old_lm_head.dtype,
+                )
+                self.model.lm_head.weight.data[:current_vocab] = old_lm_head
+            logger.info(
+                "Resized Qwen2.5-VL policy model vocab: %d -> %d for AutoVLA action tokens",
+                current_vocab, needed_vocab,
+            )
+
+        ckpt_path = self.__class__._autovla_sft_checkpoint_path
+        if ckpt_path is not None:
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            raw = ckpt["state_dict"]
+            new_state: dict[str, torch.Tensor] = {}
+            for k, v in raw.items():
+                if k.startswith("autovla."):
+                    k = k[len("autovla."):]
+                if k.startswith("vlm."):
+                    k = k[len("vlm."):]
+                if k == "lm_head.weight":
+                    k = "model.lm_head.weight"
+                new_state[k] = v
+
+            full_state = self.state_dict()
+
+            loadable: dict[str, torch.Tensor] = {}
+            skipped = 0
+            for k, v in new_state.items():
+                if k in full_state and full_state[k].shape == v.shape:
+                    loadable[k] = v
+                else:
+                    skipped += 1
+
+            if loadable:
+                self.load_state_dict(loadable, strict=False)
+            logger.info(
+                "Policy model loaded AutoVLA SFT checkpoint from %s "
+                "(loaded=%d keys, skipped=%d)",
+                ckpt_path, len(loadable), skipped,
+            )
+            self.__class__._autovla_sft_checkpoint_path = None
+
+    patched_load_hf_weights._autovla_patched = True  # type: ignore[attr-defined]
+    Qwen2_5_VLConditionalModel.load_hf_weights = patched_load_hf_weights
