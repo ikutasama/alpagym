@@ -204,7 +204,12 @@ _AUTOVLA_ACTION_START_ID = 151665
 _AUTOVLA_N_BINS = 2048
 _AUTOVLA_NEEDED_VOCAB = _AUTOVLA_ACTION_START_ID + _AUTOVLA_N_BINS
 
-_VOCAB_PAD_KEYS = {"model.embed_tokens.weight", "lm_head.weight"}
+_VOCAB_PAD_KEYS = {
+    "model.embed_tokens.weight",
+    "model.language_model.embed_tokens.weight",
+    "lm_head.weight",
+    "model.lm_head.weight",
+}
 
 
 def _load_sft_weights_into_hfmodel(hf_model: "HFModel", ckpt_path: str) -> None:
