@@ -10,11 +10,9 @@ find "${ALPAGYM_ROOT:-$HOME/alpagym}/tmp/alpagym-runs" -mindepth 1 -delete 2>/de
 docker compose down 2>/dev/null || true
 
 export GRPC_ARG_ENABLE_HTTP_PROXY="${GRPC_ARG_ENABLE_HTTP_PROXY:-0}"
-export grpc_proxy=""
-export http_proxy=""
-export https_proxy=""
-export HTTP_PROXY=""
-export HTTPS_PROXY=""
+# Keep proxy for alpasim build (downloads from pypi/pytorch.org), but bypass
+# for localhost gRPC via no_proxy.  Docker containers get proxy cleared via
+# docker-compose.override.yaml.
 export no_proxy="localhost,127.0.0.1,0.0.0.0"
 export NO_PROXY="localhost,127.0.0.1,0.0.0.0"
 
