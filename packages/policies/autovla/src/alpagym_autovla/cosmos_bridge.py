@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import torch
+from collections.abc import Callable
 from cosmos_rl.policy.model.base import BaseModel
 from cosmos_rl.policy.model.hf_models.weight_mapper import HFModelWeightMapper
 from cosmos_rl.utils import util
@@ -199,91 +200,316 @@ class Qwen2_5_VLBaseModel(BaseModel):
 # Built-in model patching for AutoVLA action tokens
 # ---------------------------------------------------------------------------
 
-def patch_cosmos_qwen_model_for_autovla(sft_checkpoint_path: str | None) -> None:
-    """Patch the built-in Cosmos-RL Qwen2.5-VL model to support AutoVLA action tokens.
+_AUTOVLA_ACTION_START_ID = 151665
+_AUTOVLA_N_BINS = 2048
+_AUTOVLA_NEEDED_VOCAB = _AUTOVLA_ACTION_START_ID + _AUTOVLA_N_BINS
 
-    The built-in ``Qwen2_5_VLConditionalModel`` does not resize its vocab for
-    AutoVLA's 2048 extra action tokens (IDs 151665-153712).  This patch wraps
-    ``load_hf_weights`` to resize embeddings and load the SFT checkpoint after
-    the base HF weights are loaded.
+_VOCAB_PAD_KEYS = {"model.embed_tokens.weight", "lm_head.weight"}
+
+
+def _load_sft_weights_into_hfmodel(hf_model: "HFModel", ckpt_path: str) -> None:
+    """Load AutoVLA SFT checkpoint weights into an HFModel (FSDP-safe).
+
+    Uses the same ``local_view.data.copy_()`` pattern as
+    ``HFModel.load_hf_weights_from_safetensors`` so that FSDP-sharded
+    parameters are handled correctly.
     """
-    try:
-        from cosmos_rl.policy.model.qwen2_5_vl import Qwen2_5_VLConditionalModel
-    except ImportError:
-        return
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    raw = ckpt["state_dict"]
+    new_state: dict[str, torch.Tensor] = {}
+    for k, v in raw.items():
+        if k.startswith("autovla."):
+            k = k[len("autovla."):]
+        if k.startswith("vlm."):
+            k = k[len("vlm."):]
+        new_state[k] = v
+    del ckpt, raw
 
-    if getattr(Qwen2_5_VLConditionalModel, "_autovla_patched", False):
+    model_state = hf_model.model.state_dict()
+    model_state = {util.clear_weight_name(k): v for k, v in model_state.items()}
+
+    loaded = 0
+    skipped = 0
+    for k, v in new_state.items():
+        if k not in model_state:
+            skipped += 1
+            continue
+        target_tensor = model_state[k]
+        is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
+        local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
+        if local_view.shape != v.shape:
+            skipped += 1
+            continue
+        with torch.no_grad():
+            local_view.data.copy_(v.to(local_view.device))
+        loaded += 1
+
+    logger.info(
+        "Policy model loaded AutoVLA SFT checkpoint from %s "
+        "(loaded=%d keys, skipped=%d)",
+        ckpt_path, loaded, skipped,
+    )
+
+
+def _autovla_load_hf_weights_from_safetensors(
+    self, model_name_or_path, parallel_dims, device, revision=None
+):
+    """Load base Qwen2.5-VL safetensors with vocab-size padding for AutoVLA.
+
+    When the model was built with ``vocab_size=153713`` (AutoVLA action
+    tokens) but the base checkpoint only has ``vocab_size=151936``, the
+    standard ``load_hf_weights_from_safetensors`` raises an assertion
+    error because ``embed_tokens.weight`` / ``lm_head.weight`` shapes
+    don't match.
+
+    This replacement loads the base safetensors, zero-pads embedding
+    tensors that are smaller than the model, then copies into the model
+    using the same FSDP-safe ``local_view.data.copy_()`` pattern.
+    """
+    from cosmos_rl.policy.model.hf_models.weight_converter import convert_weight_from_hf
+    from cosmos_rl.utils.multi_rank_weight_loader import MultiRankWeightLoader
+    import os
+
+    loader = MultiRankWeightLoader(parallel_dims)
+    model_type = self.hf_config.model_type
+    model_path = util.resolve_model_path(model_name_or_path, revision=revision)
+    safetensors_files = sorted(
+        [f for f in os.listdir(model_path) if f.endswith(".safetensors")]
+    )
+
+    self_state_dict = self.model.state_dict()
+    self_state_dict = {util.clear_weight_name(k): v for k, v in self_state_dict.items()}
+
+    lm_head_weight_key = None
+    embed_tokens_weight_key = None
+    for k in self_state_dict.keys():
+        if "embed_tokens" in k or "embeddings" in k:
+            embed_tokens_weight_key = k
+            if lm_head_weight_key is not None:
+                break
+        if "lm_head" in k:
+            lm_head_weight_key = k
+            if embed_tokens_weight_key is not None:
+                break
+    assert lm_head_weight_key is not None and embed_tokens_weight_key is not None, (
+        "lm_head and embed_tokens weight keys not found in the state dict"
+    )
+
+    hf_checkpoint_conversion_mapping = getattr(
+        self.model, "_checkpoint_conversion_mapping", None
+    )
+    from cosmos_rl.utils.transformers_utils import is_transformers_v5
+    use_v5_suffix_lookup = (
+        is_transformers_v5() and not hf_checkpoint_conversion_mapping
+    )
+    model_key_by_tail: dict[str, str] = {}
+    if use_v5_suffix_lookup:
+        _prefixes = (
+            "model.language_model.model.",
+            "model.language_model.",
+            "language_model.model.",
+            "language_model.",
+            "model.",
+            "",
+        )
+        for model_key in self_state_dict:
+            for pfx in _prefixes:
+                if model_key.startswith(pfx):
+                    tail = model_key[len(pfx):]
+                    if tail and tail not in model_key_by_tail:
+                        model_key_by_tail[tail] = model_key
+                        break
+
+    import re as _re
+
+    def name_converter(name: str) -> str:
+        if hf_checkpoint_conversion_mapping:
+            for pattern, replacement in hf_checkpoint_conversion_mapping.items():
+                if _re.search(pattern, name):
+                    return _re.sub(pattern, replacement, name)
+        elif use_v5_suffix_lookup:
+            if name in self_state_dict:
+                return name
+            for pfx in _prefixes:
+                if name.startswith(pfx):
+                    tail = name[len(pfx):]
+                    if tail and tail in model_key_by_tail:
+                        return model_key_by_tail[tail]
+            return name
+        return name
+
+    rank_tensors, rank_tensor_metadata, weights_of_ckpt_names = (
+        loader.load_files_parallel(
+            model_path, device, safetensors_files,
+            name_converter=name_converter,
+        )
+    )
+    all_tensor_names, tensor_to_rank_map = (
+        loader.gather_tensor_names_and_build_mapping(
+            weights_of_ckpt_names, rank_tensors
+        )
+    )
+
+    reserved = {}
+    for name, tensor in loader.iterate_tensors(
+        all_tensor_names, tensor_to_rank_map, rank_tensors,
+        rank_tensor_metadata, device,
+    ):
+        if self._should_skip_tensor(name):
+            continue
+        if name == embed_tokens_weight_key:
+            reserved[name] = tensor.clone()
+
+        tp_slice_dim = None
+        if self.tp_slice_dim_map is not None:
+            tp_slice_dim = self.tp_slice_dim_map.get(name, None)
+        dest_name, sharded_weight = convert_weight_from_hf(
+            tensor, name, model_type, parallel_dims,
+            tp_slice_dim=tp_slice_dim, hf_config=self.model.config,
+        )
+        if dest_name is None and sharded_weight is None:
+            continue
+        elif isinstance(dest_name, Callable):
+            target_tensor = dest_name(self_state_dict)
+        else:
+            target_tensor = self_state_dict[dest_name]
+
+        is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
+        local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
+
+        if local_view.shape != sharded_weight.shape:
+            if (
+                dest_name in _VOCAB_PAD_KEYS
+                and sharded_weight.ndim == 2
+                and local_view.ndim == 2
+                and sharded_weight.shape[1] == local_view.shape[1]
+                and sharded_weight.shape[0] < local_view.shape[0]
+            ):
+                ckpt_rows = sharded_weight.shape[0]
+                padded = torch.zeros(
+                    local_view.shape, dtype=sharded_weight.dtype,
+                    device=sharded_weight.device,
+                )
+                padded[:ckpt_rows] = sharded_weight
+                sharded_weight = padded
+                logger.info(
+                    "AutoVLA: zero-padded %s %d -> %d rows for action tokens",
+                    dest_name, ckpt_rows, local_view.shape[0],
+                )
+            else:
+                raise AssertionError(
+                    f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
+                )
+
+        with torch.no_grad():
+            local_view.data.copy_(sharded_weight)
+
+    if (
+        lm_head_weight_key not in all_tensor_names
+        and embed_tokens_weight_key in all_tensor_names
+    ):
+        name = lm_head_weight_key
+        assert embed_tokens_weight_key in reserved
+        tensor = reserved[embed_tokens_weight_key]
+
+        tp_slice_dim = None
+        if self.tp_slice_dim_map is not None:
+            tp_slice_dim = self.tp_slice_dim_map.get(name, None)
+        dest_name, sharded_weight = convert_weight_from_hf(
+            tensor, name, model_type, parallel_dims,
+            tp_slice_dim=tp_slice_dim, hf_config=self.model.config,
+        )
+        if dest_name in self_state_dict:
+            target_tensor = self_state_dict[dest_name]
+            is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
+            local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
+
+            if local_view.shape != sharded_weight.shape:
+                if (
+                    dest_name in _VOCAB_PAD_KEYS
+                    and sharded_weight.ndim == 2
+                    and local_view.ndim == 2
+                    and sharded_weight.shape[1] == local_view.shape[1]
+                    and sharded_weight.shape[0] < local_view.shape[0]
+                ):
+                    padded = torch.zeros(
+                        local_view.shape, dtype=sharded_weight.dtype,
+                        device=sharded_weight.device,
+                    )
+                    padded[:sharded_weight.shape[0]] = sharded_weight
+                    sharded_weight = padded
+
+            assert local_view.shape == sharded_weight.shape, (
+                f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
+            )
+            with torch.no_grad():
+                local_view.data.copy_(sharded_weight.to(device))
+
+
+def patch_cosmos_qwen_model_for_autovla(sft_checkpoint_path: str | None) -> None:
+    """Patch Cosmos-RL model loading to support AutoVLA action tokens.
+
+    Three patches are applied:
+
+    1. **AutoConfig vocab resize**: ``AutoConfig.from_pretrained`` is patched
+       so that ``qwen2_5_vl`` configs return ``vocab_size=153713``.  This
+       ensures the model is constructed with the correct embedding size
+       before FSDP wrapping (which makes resizing impossible).
+
+    2. **Safetensors vocab padding**: ``HFModel.load_hf_weights_from_safetensors``
+       is replaced with a version that zero-pads embedding/lm_head tensors
+       when the checkpoint has fewer vocab rows than the model, instead of
+       raising an assertion error.
+
+    3. **SFT weight loading**: ``HFModel.load_hf_weights`` is wrapped so
+       that after the base Qwen2.5-VL safetensors are loaded, the AutoVLA
+       SFT checkpoint is loaded on top using the same FSDP-safe
+       ``local_view.data.copy_()`` pattern.
+    """
+    from cosmos_rl.policy.model.hf_models import HFModel
+
+    if getattr(HFModel, "_autovla_patched", False):
         if sft_checkpoint_path is not None:
-            Qwen2_5_VLConditionalModel._autovla_sft_checkpoint_path = sft_checkpoint_path
+            HFModel._autovla_sft_checkpoint_path = sft_checkpoint_path
         return
 
-    Qwen2_5_VLConditionalModel._autovla_sft_checkpoint_path = sft_checkpoint_path
-    original_load_hf_weights = Qwen2_5_VLConditionalModel.load_hf_weights
+    HFModel._autovla_sft_checkpoint_path = sft_checkpoint_path
+
+    # --- Patch 1: AutoConfig.from_pretrained vocab resize ------------------
+    _original_autoconfig_from_pretrained = AutoConfig.from_pretrained
+
+    def _patched_autoconfig_from_pretrained(model_name_or_path, *args, **kwargs):
+        cfg = _original_autoconfig_from_pretrained(model_name_or_path, *args, **kwargs)
+        if (
+            getattr(cfg, "model_type", None) == "qwen2_5_vl"
+            and getattr(cfg, "vocab_size", 0) < _AUTOVLA_NEEDED_VOCAB
+        ):
+            old_vocab = cfg.vocab_size
+            cfg.vocab_size = _AUTOVLA_NEEDED_VOCAB
+            if hasattr(cfg, "text_config") and hasattr(cfg.text_config, "vocab_size"):
+                cfg.text_config.vocab_size = _AUTOVLA_NEEDED_VOCAB
+            logger.info(
+                "AutoConfig.from_pretrained: resized qwen2_5_vl vocab_size "
+                "%d -> %d for AutoVLA action tokens",
+                old_vocab, _AUTOVLA_NEEDED_VOCAB,
+            )
+        return cfg
+
+    AutoConfig.from_pretrained = _patched_autoconfig_from_pretrained
+
+    # --- Patch 2: HFModel.load_hf_weights_from_safetensors vocab padding ---
+    HFModel.load_hf_weights_from_safetensors = _autovla_load_hf_weights_from_safetensors
+
+    # --- Patch 3: HFModel.load_hf_weights SFT loading ----------------------
+    original_load_hf_weights = HFModel.load_hf_weights
 
     def patched_load_hf_weights(self, model_name_or_path, parallel_dims, device, revision=None):
         original_load_hf_weights(self, model_name_or_path, parallel_dims, device, revision=revision)
 
-        action_start_id = 151665
-        n_bins = 2048
-        needed_vocab = action_start_id + n_bins
-        current_vocab = self.model.config.vocab_size
-        if current_vocab < needed_vocab:
-            old_embed = self.model.embed_tokens.weight.data
-            self.model.embed_tokens = torch.nn.Embedding(
-                needed_vocab, self.model.config.dim,
-                device=old_embed.device, dtype=old_embed.dtype,
-            )
-            self.model.embed_tokens.weight.data[:current_vocab] = old_embed
-            self.model.config.vocab_size = needed_vocab
-            self.vocab_size = needed_vocab
-            if hasattr(self, "hf_config"):
-                self.hf_config.vocab_size = needed_vocab
-            if hasattr(self, "weight_mapper") and hasattr(self.weight_mapper, "config"):
-                self.weight_mapper.config.vocab_size = needed_vocab
-            if hasattr(self.model, "lm_head") and not self.model.tie_embed_tokens:
-                old_lm_head = self.model.lm_head.weight.data
-                self.model.lm_head = torch.nn.Linear(
-                    self.model.config.dim, needed_vocab, bias=False,
-                    device=old_lm_head.device, dtype=old_lm_head.dtype,
-                )
-                self.model.lm_head.weight.data[:current_vocab] = old_lm_head
-            logger.info(
-                "Resized Qwen2.5-VL policy model vocab: %d -> %d for AutoVLA action tokens",
-                current_vocab, needed_vocab,
-            )
-
         ckpt_path = self.__class__._autovla_sft_checkpoint_path
         if ckpt_path is not None:
-            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-            raw = ckpt["state_dict"]
-            new_state: dict[str, torch.Tensor] = {}
-            for k, v in raw.items():
-                if k.startswith("autovla."):
-                    k = k[len("autovla."):]
-                if k.startswith("vlm."):
-                    k = k[len("vlm."):]
-                if k == "lm_head.weight":
-                    k = "model.lm_head.weight"
-                new_state[k] = v
-
-            full_state = self.state_dict()
-
-            loadable: dict[str, torch.Tensor] = {}
-            skipped = 0
-            for k, v in new_state.items():
-                if k in full_state and full_state[k].shape == v.shape:
-                    loadable[k] = v
-                else:
-                    skipped += 1
-
-            if loadable:
-                self.load_state_dict(loadable, strict=False)
-            logger.info(
-                "Policy model loaded AutoVLA SFT checkpoint from %s "
-                "(loaded=%d keys, skipped=%d)",
-                ckpt_path, len(loadable), skipped,
-            )
+            _load_sft_weights_into_hfmodel(self, ckpt_path)
             self.__class__._autovla_sft_checkpoint_path = None
 
-    patched_load_hf_weights._autovla_patched = True  # type: ignore[attr-defined]
-    Qwen2_5_VLConditionalModel.load_hf_weights = patched_load_hf_weights
+    HFModel._autovla_patched = True
+    HFModel.load_hf_weights = patched_load_hf_weights
