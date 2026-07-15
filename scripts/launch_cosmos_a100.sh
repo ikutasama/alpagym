@@ -31,6 +31,7 @@ sed -i \
   -e 's|^n_generation = .*|n_generation = 4|' \
   -e 's|^train_batch_per_replica = .*|train_batch_per_replica = 2|' \
   -e 's|^max_response_length = .*|max_response_length = 500|' \
+  -e 's|dp_shard_size = [0-9]*|dp_shard_size = 1|g' \
   "$LATEST_DIR/cosmos_config.toml"
 
 sed -i \
