@@ -552,11 +552,13 @@ class AutoVLAInferenceModel:
         }
         if "completion_ids" in model_output.extra:
             comp = model_output.extra["completion_ids"]
-            # completion_ids shape: [B, T] (from pad_sequence)
-            # action_selection.set_ix and sample_ix are always 0 for S=K=1
-            batch_idx = 0
-            selected_completion_ids = comp[batch_idx]
-            payload["completion_ids"] = torch.as_tensor(selected_completion_ids, dtype=torch.int64)
+            # After _split_extra_per_model_output, comp is already [T] (1D).
+            # The old code indexed comp[batch_idx] which took a single scalar
+            # (the first token) instead of the full sequence.  Only index if
+            # the tensor still has a batch dimension.
+            if comp.dim() > 1:
+                comp = comp[0]
+            payload["completion_ids"] = torch.as_tensor(comp, dtype=torch.int64)
         return PolicyReplayData(
             replay_schema_version=1,
             payload_schema="autovla.action_tokens.v1",
