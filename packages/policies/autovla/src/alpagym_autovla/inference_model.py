@@ -173,7 +173,7 @@ class AutoVLAInferenceModel:
         # 2. Generate action tokens
         gen_kwargs = {
             "do_sample": True,
-            "max_length": 2048,
+            "max_new_tokens": 200,
             "temperature": sampling.temperature if sampling.temperature else 0.01,
             "top_k": sampling.top_k if sampling.top_k else 0,
             "top_p": sampling.top_p if sampling.top_p else 1.0,

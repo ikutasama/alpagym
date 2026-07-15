@@ -28,6 +28,9 @@ sed -i \
   -e 's|^epoch = .*|epoch = 3|' \
   -e 's|^save_freq = .*|save_freq = 50|' \
   -e 's|^experiment_name = .*|experiment_name = "autovla_full_train"|' \
+  -e 's|^n_generation = .*|n_generation = 4|' \
+  -e 's|^train_batch_per_replica = .*|train_batch_per_replica = 2|' \
+  -e 's|^max_response_length = .*|max_response_length = 200|' \
   "$LATEST_DIR/cosmos_config.toml"
 
 sed -i \
@@ -37,7 +40,11 @@ sed -i \
   -e 's|experiment_name: autovla_local_smoke|experiment_name: autovla_full_train|' \
   "$LATEST_DIR/resolved_config.yaml"
 
-echo "  max_num_steps=916 (916 scenes - 1 per step), epoch=3, save_freq=50"
+# Set 4-GPU FSDP sharding
+sed -i '/\[policy\.parallelism\]/,/^$/{s/^dp_shard_size = .*/dp_shard_size = 4/}' "$LATEST_DIR/cosmos_config.toml"
+sed -i '/\[rollout\.parallelism\]/,/^$/{s/^dp_shard_size = .*/dp_shard_size = 4/}' "$LATEST_DIR/cosmos_config.toml"
+
+echo "  max_num_steps=916, epoch=3, save_freq=50, n_generation=4, batch=2, max_response=200, dp_shard=4"
 
 echo "[3/4] Creating run directory symlinks on A100 ..."
 RUN_ID=$(grep -oP 'alpagym-runs/\K[^/]+' "$LATEST_DIR/resolved_config.yaml" 2>/dev/null | head -1 || true)
@@ -61,7 +68,7 @@ export no_proxy='' NO_PROXY='' TMPDIR="$TMPDIR" ALPAGYM_DRIVER_HOST=localhost AL
 cd "$ALPAGYM_DIR"
 AUTOVLA_REPO_PATH=/data/mnt_m62/10_personal/z59900495/workspace/AutoVLA \
 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1 \
-CUDA_VISIBLE_DEVICES=0,1,2,3 UV_NO_MANAGED_PYTHON=1 UV_PYTHON=$(which python) \
+CUDA_VISIBLE_DEVICES=2,3,4,5 UV_NO_MANAGED_PYTHON=1 UV_PYTHON=$(which python) \
 uv run --no-sync --all-packages python -m cosmos_rl.launcher.launch_all \
   --config "$LATEST_DIR/cosmos_config.toml" \
   --policy 1 --rollout 1 --num-workers 1 --worker-idx 0 --port 29500 \
