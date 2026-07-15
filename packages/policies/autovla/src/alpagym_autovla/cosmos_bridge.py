@@ -227,16 +227,23 @@ def _load_sft_weights_into_hfmodel(hf_model: "HFModel", ckpt_path: str) -> None:
             k = k[len("autovla."):]
         if k.startswith("vlm."):
             k = k[len("vlm."):]
-        # Map SFT checkpoint keys (HuggingFace Qwen2_5_VLForConditionalGeneration
-        # after stripping autovla./vlm. prefixes) to cosmos-rl
-        # Qwen2_5_VLConditionalModel keys:
-        #   SFT: visual.*             ->  model: model.visual.*
-        #   SFT: lm_head.weight       ->  model: model.lm_head.weight
-        #   SFT: model.layers.* etc.  ->  model: model.layers.* (already matches)
+        # Map SFT checkpoint keys (after stripping autovla./vlm.) to
+        # HuggingFace Qwen2_5_VLForConditionalGeneration keys:
+        #   SFT: visual.*                -> model: model.visual.*
+        #   SFT: model.layers.*          -> model: model.language_model.layers.*
+        #   SFT: model.embed_tokens*     -> model: model.language_model.embed_tokens*
+        #   SFT: model.norm*             -> model: model.language_model.norm*
+        #   SFT: lm_head.weight          -> model: lm_head.weight (top-level, no model. prefix)
         if k.startswith("visual."):
             k = "model." + k
+        elif k.startswith("model.layers."):
+            k = "model.language_model." + k[len("model."):]
+        elif k.startswith("model.embed_tokens"):
+            k = "model.language_model." + k[len("model."):]
+        elif k.startswith("model.norm"):
+            k = "model.language_model." + k[len("model."):]
         elif k == "lm_head.weight":
-            k = "model.lm_head.weight"
+            pass  # already correct, lm_head is top-level in HF model
         new_state[k] = v
     del ckpt, raw
 
