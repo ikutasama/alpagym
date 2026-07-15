@@ -29,14 +29,13 @@ sed -i \
   -e 's|^save_freq = .*|save_freq = 50|' \
   -e 's|^experiment_name = .*|experiment_name = "autovla_full_train"|' \
   -e 's|^n_generation = .*|n_generation = 4|' \
-  -e 's|^train_batch_per_replica = .*|train_batch_per_replica = 4|' \
+  -e 's|^train_batch_per_replica = .*|train_batch_per_replica = 1|' \
   -e 's|^max_response_length = .*|max_response_length = 500|' \
   "$LATEST_DIR/cosmos_config.toml"
 
-# Set 4-GPU FSDP: both policy and rollout must match for colocated mode
-sed -i 's/dp_shard_size.*=.*/dp_shard_size = 4/' "$LATEST_DIR/cosmos_config.toml"
-grep -A1 '\[rollout.parallelism\]' "$LATEST_DIR/cosmos_config.toml" | grep -q 'dp_shard_size' || \
-  sed -i '/\[rollout.parallelism\]/a dp_shard_size = 4' "$LATEST_DIR/cosmos_config.toml"
+# dp_shard_size=1 (single GPU). Multi-GPU FSDP causes Gloo timeout in A100 Docker.
+sed -i 's/dp_shard_size.*=.*/dp_shard_size = 1/' "$LATEST_DIR/cosmos_config.toml"
+sed -i '/\[rollout.parallelism\]/,$d' /dev/null  # noop, keep existing
 
 sed -i \
   -e 's|max_num_steps: .*|max_num_steps: 916|' \
