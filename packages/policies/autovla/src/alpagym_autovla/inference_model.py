@@ -171,9 +171,12 @@ class AutoVLAInferenceModel:
         model_inputs = self._build_qwen_inputs(model_input, batch_idx)
 
         # 2. Generate action tokens
+        # num_poses=10 action tokens + short text + EOS ≈ 30 tokens.
+        # 80 gives generous headroom; the original 500 caused 20-min
+        # generation stalls when the model didn't emit EOS.
         gen_kwargs = {
             "do_sample": True,
-            "max_new_tokens": 500,
+            "max_new_tokens": 80,
             "temperature": 0.9,
             "top_k": sampling.top_k if sampling.top_k else 0,
             "top_p": sampling.top_p if sampling.top_p else 1.0,

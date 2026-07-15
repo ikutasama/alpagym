@@ -33,11 +33,17 @@ sed -i \
   -e 's|^max_response_length = .*|max_response_length = 500|' \
   "$LATEST_DIR/cosmos_config.toml"
 
-# Multi-GPU: dp_shard_size=4 with NCCL_P2P_DISABLE=1 (P2P broken on A100 Docker)
-# and GLOO_TIMEOUT_SECONDS=3600 (Gloo CPU-side broadcast can be slow)
-sed -i 's/dp_shard_size.*=.*/dp_shard_size = 4/' "$LATEST_DIR/cosmos_config.toml"
+# Single-GPU mode: 80GB A100 fits full 3B model + Adam optimizer (~47GB).
+# No FSDP needed — eliminates all-gather overhead that made inference 20x slower.
+# dp_shard_size=1 means the model is NOT sharded; each replica uses 1 GPU.
+sed -i 's/dp_shard_size.*=.*/dp_shard_size = 1/' "$LATEST_DIR/cosmos_config.toml"
 grep -A1 '\[rollout.parallelism\]' "$LATEST_DIR/cosmos_config.toml" | grep -q 'dp_shard_size' || \
-  sed -i '/\[rollout.parallelism\]/a dp_shard_size = 4' "$LATEST_DIR/cosmos_config.toml"
+  sed -i '/\[rollout.parallelism\]/a dp_shard_size = 1' "$LATEST_DIR/cosmos_config.toml"
+
+sed -i \
+  -e '/\[policy\.parallelism\]/,/^$/{s/^dp_shard_size = .*/dp_shard_size = 1/}' \
+  -e '/\[rollout\.parallelism\]/,/^$/{s/^dp_shard_size = .*/dp_shard_size = 1/}' \
+  "$LATEST_DIR/cosmos_config.toml"
 
 sed -i \
   -e 's|max_num_steps: .*|max_num_steps: 916|' \
@@ -46,11 +52,7 @@ sed -i \
   -e 's|experiment_name: autovla_local_smoke|experiment_name: autovla_full_train|' \
   "$LATEST_DIR/resolved_config.yaml"
 
-# Set 4-GPU FSDP sharding
-sed -i '/\[policy\.parallelism\]/,/^$/{s/^dp_shard_size = .*/dp_shard_size = 4/}' "$LATEST_DIR/cosmos_config.toml"
-sed -i '/\[rollout\.parallelism\]/,/^$/{s/^dp_shard_size = .*/dp_shard_size = 4/}' "$LATEST_DIR/cosmos_config.toml"
-
-echo "  max_num_steps=916, epoch=3, save_freq=50, n_generation=4, batch=4, max_response=500, dp_shard=4"
+echo "  max_num_steps=916, epoch=3, save_freq=50, n_generation=4, batch=4, max_response=500, dp_shard=1"
 
 echo "[3/4] Creating run directory symlinks on A100 ..."
 RUN_ID=$(grep -oP 'alpagym-runs/\K[^/]+' "$LATEST_DIR/resolved_config.yaml" 2>/dev/null | head -1 || true)
@@ -74,7 +76,7 @@ export GRPC_ARG_ENABLE_HTTP_PROXY=0 no_proxy='localhost,127.0.0.1,0.0.0.0' NO_PR
 cd "$ALPAGYM_DIR"
 AUTOVLA_REPO_PATH=/data/mnt_m62/10_personal/z59900495/workspace/AutoVLA \
 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1 \
-CUDA_VISIBLE_DEVICES=2,3,4,5 UV_NO_MANAGED_PYTHON=1 UV_PYTHON=$(which python) \
+CUDA_VISIBLE_DEVICES=2 UV_NO_MANAGED_PYTHON=1 UV_PYTHON=$(which python) \
 uv run --no-sync --all-packages python -m cosmos_rl.launcher.launch_all \
   --config "$LATEST_DIR/cosmos_config.toml" \
   --policy 1 --rollout 1 --num-workers 1 --worker-idx 0 --port 29500 \
