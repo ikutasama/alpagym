@@ -244,6 +244,15 @@ def _load_sft_weights_into_hfmodel(hf_model: "HFModel", ckpt_path: str) -> None:
     model_state = hf_model.model.state_dict()
     model_state = {util.clear_weight_name(k): v for k, v in model_state.items()}
 
+    # Debug: log first 10 SFT keys and model_state keys
+    sft_keys = list(new_state.keys())[:10]
+    model_keys = list(model_state.keys())[:10]
+    logger.info(
+        "SFT key mapping debug: sft_keys_sample=%s model_keys_sample=%s "
+        "sft_total=%d model_total=%d",
+        sft_keys, model_keys, len(new_state), len(model_state),
+    )
+
     loaded = 0
     skipped = 0
     for k, v in new_state.items():
