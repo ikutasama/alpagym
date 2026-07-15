@@ -33,9 +33,6 @@ sed -i \
   -e 's|^max_response_length = .*|max_response_length = 500|' \
   "$LATEST_DIR/cosmos_config.toml"
 
-# Set 4-GPU FSDP sharding for both policy and rollout
-sed -i 's/^dp_shard_size = 1$/dp_shard_size = 4/' "$LATEST_DIR/cosmos_config.toml"
-
 sed -i \
   -e 's|max_num_steps: .*|max_num_steps: 916|' \
   -e 's|num_epochs: .*|num_epochs: 3|' \
