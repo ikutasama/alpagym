@@ -31,6 +31,38 @@ from alpagym_runtime.policies.registry import get_policy_bundle
 _nccl_store_master = None
 
 
+def _patch_distributed_timeout() -> None:
+    """Override torch.distributed process group timeout.
+
+    cosmos-rl may set a 600-second default timeout for both Gloo and NCCL
+    process groups.  This is too short when the rollout has transient gRPC
+    failures (e.g., SSH tunnel not yet stable, driver server initialising).
+    A single failed simulate() call with 3 retries at 600 s each can exceed
+    the 600 s broadcast timeout, crashing the job.
+
+    This monkey-patch forces init_process_group to use at least
+    GLOO_TIMEOUT_SECONDS (default 3600 s) as the timeout.
+    """
+    import torch.distributed as dist
+    from datetime import timedelta
+
+    min_seconds = int(os.environ.get("GLOO_TIMEOUT_SECONDS", "3600"))
+    min_td = timedelta(seconds=min_seconds)
+    _original_init = dist.init_process_group
+
+    def _patched_init(*args, **kwargs):
+        current = kwargs.get("timeout")
+        if current is None or current.total_seconds() < min_seconds:
+            logging.info(
+                "init_process_group: overriding timeout %s -> %s",
+                current, min_td,
+            )
+            kwargs["timeout"] = min_td
+        return _original_init(*args, **kwargs)
+
+    dist.init_process_group = _patched_init
+
+
 def _configure_logging(level: str) -> None:
     """Configure process-wide logging for Cosmos worker processes."""
     logging.basicConfig(
@@ -147,6 +179,10 @@ def main(argv: list[str] | None = None) -> None:
     cosmos_config = tomllib.loads(Path(args.config).read_text(encoding="utf-8"))
     run_config = load_run_config(Path(cosmos_config["custom"]["resolved_config_path"]))
     _configure_logging(str(run_config.logging_level))
+
+    # Force longer Gloo/NCCL timeout so transient gRPC failures during rollout
+    # startup don't crash the job with a 600 s broadcast timeout.
+    _patch_distributed_timeout()
 
     cosmos_role = os.environ.get("COSMOS_ROLE")
 
