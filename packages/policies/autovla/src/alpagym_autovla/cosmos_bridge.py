@@ -227,15 +227,14 @@ def _load_sft_weights_into_hfmodel(hf_model: "HFModel", ckpt_path: str) -> None:
             k = k[len("autovla."):]
         if k.startswith("vlm."):
             k = k[len("vlm."):]
-        # Map HuggingFace Qwen2_5_VLForConditionalGeneration keys to
-        # cosmos-rl Qwen2_5_VLConditionalModel keys:
-        #   model.language_model.*  ->  model.*
-        #   model.visual.*           ->  visual.*
-        #   lm_head.weight            ->  model.lm_head.weight
-        if k.startswith("model.language_model."):
-            k = "model." + k[len("model.language_model."):]
-        elif k.startswith("model.visual."):
-            k = "visual." + k[len("model.visual."):]
+        # Map SFT checkpoint keys (HuggingFace Qwen2_5_VLForConditionalGeneration
+        # after stripping autovla./vlm. prefixes) to cosmos-rl
+        # Qwen2_5_VLConditionalModel keys:
+        #   SFT: visual.*             ->  model: model.visual.*
+        #   SFT: lm_head.weight       ->  model: model.lm_head.weight
+        #   SFT: model.layers.* etc.  ->  model: model.layers.* (already matches)
+        if k.startswith("visual."):
+            k = "model." + k
         elif k == "lm_head.weight":
             k = "model.lm_head.weight"
         new_state[k] = v
