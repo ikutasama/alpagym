@@ -30,8 +30,11 @@ sed -i \
   -e 's|^experiment_name = .*|experiment_name = "autovla_full_train"|' \
   -e 's|^n_generation = .*|n_generation = 4|' \
   -e 's|^train_batch_per_replica = .*|train_batch_per_replica = 2|' \
-  -e 's|^max_response_length = .*|max_response_length = 200|' \
+  -e 's|^max_response_length = .*|max_response_length = 500|' \
   "$LATEST_DIR/cosmos_config.toml"
+
+# Set 4-GPU FSDP sharding for both policy and rollout
+sed -i 's/^dp_shard_size = 1$/dp_shard_size = 4/' "$LATEST_DIR/cosmos_config.toml"
 
 sed -i \
   -e 's|max_num_steps: .*|max_num_steps: 916|' \
