@@ -29,13 +29,15 @@ sed -i \
   -e 's|^save_freq = .*|save_freq = 50|' \
   -e 's|^experiment_name = .*|experiment_name = "autovla_full_train"|' \
   -e 's|^n_generation = .*|n_generation = 4|' \
-  -e 's|^train_batch_per_replica = .*|train_batch_per_replica = 1|' \
+  -e 's|^train_batch_per_replica = .*|train_batch_per_replica = 4|' \
   -e 's|^max_response_length = .*|max_response_length = 500|' \
   "$LATEST_DIR/cosmos_config.toml"
 
-# dp_shard_size=1 (single GPU). Multi-GPU FSDP causes Gloo timeout in A100 Docker.
-sed -i 's/dp_shard_size.*=.*/dp_shard_size = 1/' "$LATEST_DIR/cosmos_config.toml"
-sed -i '/\[rollout.parallelism\]/,$d' /dev/null  # noop, keep existing
+# Multi-GPU: dp_shard_size=4 with NCCL_P2P_DISABLE=1 (P2P broken on A100 Docker)
+# and GLOO_TIMEOUT_SECONDS=3600 (Gloo CPU-side broadcast can be slow)
+sed -i 's/dp_shard_size.*=.*/dp_shard_size = 4/' "$LATEST_DIR/cosmos_config.toml"
+grep -A1 '\[rollout.parallelism\]' "$LATEST_DIR/cosmos_config.toml" | grep -q 'dp_shard_size' || \
+  sed -i '/\[rollout.parallelism\]/a dp_shard_size = 4' "$LATEST_DIR/cosmos_config.toml"
 
 sed -i \
   -e 's|max_num_steps: .*|max_num_steps: 916|' \
@@ -68,7 +70,7 @@ fi
 
 echo "[4/4] Launching cosmos ..."
 unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY grpc_proxy GRPC_PROXY all_proxy ALL_PROXY
-export no_proxy='' NO_PROXY='' TMPDIR="$TMPDIR" ALPAGYM_DRIVER_HOST=localhost ALPAGYM_DRIVER_PORT=5012
+export no_proxy='' NO_PROXY='' TMPDIR="$TMPDIR" NCCL_P2P_DISABLE=1 GLOO_TIMEOUT_SECONDS=3600 ALPAGYM_DRIVER_HOST=localhost ALPAGYM_DRIVER_PORT=5012
 cd "$ALPAGYM_DIR"
 AUTOVLA_REPO_PATH=/data/mnt_m62/10_personal/z59900495/workspace/AutoVLA \
 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1 \
