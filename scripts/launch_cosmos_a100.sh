@@ -50,7 +50,7 @@ sed -i \
 sed -i '/\[policy\.parallelism\]/,/^$/{s/^dp_shard_size = .*/dp_shard_size = 4/}' "$LATEST_DIR/cosmos_config.toml"
 sed -i '/\[rollout\.parallelism\]/,/^$/{s/^dp_shard_size = .*/dp_shard_size = 4/}' "$LATEST_DIR/cosmos_config.toml"
 
-echo "  max_num_steps=916, epoch=3, save_freq=50, n_generation=4, batch=2, max_response=200, dp_shard=4"
+echo "  max_num_steps=916, epoch=3, save_freq=50, n_generation=4, batch=4, max_response=500, dp_shard=4"
 
 echo "[3/4] Creating run directory symlinks on A100 ..."
 RUN_ID=$(grep -oP 'alpagym-runs/\K[^/]+' "$LATEST_DIR/resolved_config.yaml" 2>/dev/null | head -1 || true)
@@ -70,7 +70,7 @@ fi
 
 echo "[4/4] Launching cosmos ..."
 unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY grpc_proxy GRPC_PROXY all_proxy ALL_PROXY
-export no_proxy='' NO_PROXY='' TMPDIR="$TMPDIR" NCCL_P2P_DISABLE=1 GLOO_TIMEOUT_SECONDS=3600 ALPAGYM_DRIVER_HOST=localhost ALPAGYM_DRIVER_PORT=5012
+export GRPC_ARG_ENABLE_HTTP_PROXY=0 no_proxy='localhost,127.0.0.1,0.0.0.0' NO_PROXY='localhost,127.0.0.1,0.0.0.0' TMPDIR="$TMPDIR" NCCL_P2P_DISABLE=1 GLOO_TIMEOUT_SECONDS=3600 ALPAGYM_DRIVER_HOST=localhost ALPAGYM_DRIVER_PORT=5012
 cd "$ALPAGYM_DIR"
 AUTOVLA_REPO_PATH=/data/mnt_m62/10_personal/z59900495/workspace/AutoVLA \
 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1 \
