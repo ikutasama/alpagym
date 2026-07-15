@@ -29,7 +29,7 @@ sed -i \
   -e 's|^save_freq = .*|save_freq = 50|' \
   -e 's|^experiment_name = .*|experiment_name = "autovla_full_train"|' \
   -e 's|^n_generation = .*|n_generation = 4|' \
-  -e 's|^train_batch_per_replica = .*|train_batch_per_replica = 2|' \
+  -e 's|^train_batch_per_replica = .*|train_batch_per_replica = 4|' \
   -e 's|^max_response_length = .*|max_response_length = 500|' \
   "$LATEST_DIR/cosmos_config.toml"
 
