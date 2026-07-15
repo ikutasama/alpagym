@@ -34,9 +34,9 @@ sed -i \
   "$LATEST_DIR/cosmos_config.toml"
 
 # Set 4-GPU FSDP: both policy and rollout must match for colocated mode
-sed -i 's/dp_shard_size.*= .*/dp_shard_size = 4/' "$LATEST_DIR/cosmos_config.toml"
-# Ensure rollout.parallelism also has dp_shard_size (may be missing in template)
-sed -i '/\[rollout.parallelism\]/{n;/dp_shard_size/!i dp_shard_size = 4\n}' "$LATEST_DIR/cosmos_config.toml"
+sed -i 's/dp_shard_size.*=.*/dp_shard_size = 4/' "$LATEST_DIR/cosmos_config.toml"
+grep -A1 '\[rollout.parallelism\]' "$LATEST_DIR/cosmos_config.toml" | grep -q 'dp_shard_size' || \
+  sed -i '/\[rollout.parallelism\]/a dp_shard_size = 4' "$LATEST_DIR/cosmos_config.toml"
 
 sed -i \
   -e 's|max_num_steps: .*|max_num_steps: 916|' \
