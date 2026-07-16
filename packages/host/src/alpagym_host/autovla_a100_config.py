@@ -1,0 +1,336 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Configure copied AutoVLA run artifacts for four A100 Cosmos workers."""
+
+from __future__ import annotations
+
+import argparse
+import shutil
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import tomli_w
+import yaml
+
+
+@dataclass(frozen=True)
+class A100TrainGeometry:
+    """Coupled rollout and policy settings for the four-GPU A100 process."""
+
+    policy_replicas: int = 3
+    rollout_replicas: int = 1
+    n_generation: int = 8
+    rollout_batch_size: int = 3
+    train_batch_per_replica: int = 8
+    mini_batch: int = 2
+    max_inference_batch_size: int = 3
+    max_num_steps: int = 916
+    num_epochs: int = 3
+    learning_rate: float = 1.0e-6
+    warmup_steps: int = 20
+    ratio_clip: float = 0.1
+    allowed_outdated_steps: int = 1
+    save_freq: int = 50
+    grad_norm_clip: float = 1.0
+    experiment_name: str = "autovla_a100_4gpu_grpo"
+
+    def validate(self) -> None:
+        """Reject geometry that would produce partial or uneven policy batches."""
+        positive_ints = {
+            "policy_replicas": self.policy_replicas,
+            "rollout_replicas": self.rollout_replicas,
+            "n_generation": self.n_generation,
+            "rollout_batch_size": self.rollout_batch_size,
+            "train_batch_per_replica": self.train_batch_per_replica,
+            "mini_batch": self.mini_batch,
+            "max_inference_batch_size": self.max_inference_batch_size,
+            "max_num_steps": self.max_num_steps,
+            "num_epochs": self.num_epochs,
+            "warmup_steps": self.warmup_steps,
+            "save_freq": self.save_freq,
+        }
+        invalid = {name: value for name, value in positive_ints.items() if value <= 0}
+        if invalid:
+            raise ValueError(f"A100 training values must be positive: {invalid}")
+        if self.rollout_replicas != 1:
+            raise ValueError(
+                "The current 5012 SSH tunnel exposes one Egodriver port, so this preset "
+                "requires rollout_replicas=1. Add one driver port/tunnel per rollout "
+                "replica before increasing it."
+            )
+        if self.train_batch_per_replica % self.mini_batch != 0:
+            raise ValueError(
+                "train_batch_per_replica must be divisible by mini_batch; got "
+                f"{self.train_batch_per_replica} and {self.mini_batch}"
+            )
+        produced = self.rollout_replicas * self.rollout_batch_size * self.n_generation
+        consumed = self.policy_replicas * self.train_batch_per_replica
+        if produced != consumed:
+            raise ValueError(
+                "Global rollout and policy batch geometry must match: "
+                f"rollout_replicas({self.rollout_replicas}) * "
+                f"rollout_batch_size({self.rollout_batch_size}) * "
+                f"n_generation({self.n_generation}) = {produced}, but "
+                f"policy_replicas({self.policy_replicas}) * "
+                f"train_batch_per_replica({self.train_batch_per_replica}) = {consumed}"
+            )
+        if self.learning_rate <= 0.0:
+            raise ValueError(
+                f"learning_rate must be positive, got {self.learning_rate}"
+            )
+        if not 0.0 < self.ratio_clip < 1.0:
+            raise ValueError(f"ratio_clip must be in (0, 1), got {self.ratio_clip}")
+        if self.allowed_outdated_steps < 0:
+            raise ValueError(
+                "allowed_outdated_steps must be non-negative, got "
+                f"{self.allowed_outdated_steps}"
+            )
+        if self.grad_norm_clip <= 0.0:
+            raise ValueError(
+                f"grad_norm_clip must be positive, got {self.grad_norm_clip}"
+            )
+
+
+def configure_autovla_a100_run(run_dir: Path, geometry: A100TrainGeometry) -> None:
+    """Patch both config sources consumed by Cosmos and the AlpaGym backend."""
+    geometry.validate()
+    resolved_path = run_dir / "resolved_config.yaml"
+    cosmos_path = run_dir / "cosmos_config.toml"
+    if not resolved_path.is_file() or not cosmos_path.is_file():
+        raise FileNotFoundError(
+            f"Expected resolved_config.yaml and cosmos_config.toml under {run_dir}"
+        )
+
+    _backup_once(resolved_path)
+    _backup_once(cosmos_path)
+
+    resolved = yaml.safe_load(resolved_path.read_text(encoding="utf-8"))
+    if not isinstance(resolved, dict):
+        raise TypeError(f"Expected a YAML mapping in {resolved_path}")
+    cosmos_config = tomllib.loads(cosmos_path.read_text(encoding="utf-8"))
+
+    _update_resolved_config(resolved, geometry)
+    _update_cosmos_config(cosmos_config, geometry)
+
+    _atomic_write(
+        resolved_path,
+        yaml.safe_dump(resolved, sort_keys=False, default_flow_style=False),
+    )
+    _atomic_write(cosmos_path, tomli_w.dumps(cosmos_config))
+
+
+def _update_resolved_config(
+    config: dict[str, Any], geometry: A100TrainGeometry
+) -> None:
+    """Update values read by AlpaGym rollout, packer, and transport code."""
+    transport = _mapping(config, "transport")
+    transport.update(
+        {
+            "kind": "nccl",
+            "nccl_env": {
+                "NCCL_SHM_DISABLE": "0",
+                "NCCL_DEBUG": "WARN",
+                "NCCL_IB_DISABLE": "1",
+                "NCCL_SOCKET_IFNAME": "^lo,^docker",
+                "NCCL_TIMEOUT": "1800",
+                "NCCL_P2P_DISABLE": "0",
+                "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
+            },
+            "nccl_read_device": "cpu",
+        }
+    )
+
+    cosmos = _mapping(config, "cosmos")
+    cosmos["mode"] = "disaggregated"
+
+    launch = _mapping(cosmos, "launch")
+    launch["policy_replicas"] = geometry.policy_replicas
+    launch["rollout_replicas"] = geometry.rollout_replicas
+
+    policy_parallelism = _mapping(_mapping(cosmos, "policy"), "parallelism")
+    policy_parallelism["dp_shard_size"] = 1
+
+    train = _mapping(cosmos, "train")
+    train.update(
+        {
+            "train_batch_per_replica": geometry.train_batch_per_replica,
+            "max_num_steps": geometry.max_num_steps,
+            "num_epochs": geometry.num_epochs,
+            "optm_lr": geometry.learning_rate,
+            "optm_warmup_steps": geometry.warmup_steps,
+            "optm_decay_type": "cosine",
+            "optm_decay_ratio": 1.0,
+            "optm_min_lr_factor": 0.1,
+        }
+    )
+    checkpoint = _mapping(train, "ckpt")
+    checkpoint.update(
+        {
+            "enable_checkpoint": True,
+            "save_freq": geometry.save_freq,
+            "export_safetensors": False,
+            "max_keep": 3,
+        }
+    )
+    train_policy = _mapping(train, "train_policy")
+    train_policy.update(
+        {
+            "allowed_outdated_steps": geometry.allowed_outdated_steps,
+            "on_policy": False,
+            "mini_batch": geometry.mini_batch,
+            "grpo_ratio_clip_low": geometry.ratio_clip,
+            "grpo_ratio_clip_high": geometry.ratio_clip,
+            "grpo_optimization_iterations": 1,
+            "kl_beta": 0.0,
+            "reference_reset_interval": 0,
+        }
+    )
+
+    rollout = _mapping(cosmos, "rollout")
+    rollout.update(
+        {
+            "n_generation": geometry.n_generation,
+            "batch_size": geometry.rollout_batch_size,
+            "prefetch_rollout": False,
+        }
+    )
+    _mapping(cosmos, "logging")["experiment_name"] = geometry.experiment_name
+
+    inference = _mapping(_mapping(config, "policy"), "inference")
+    inference["max_batch_size"] = geometry.max_inference_batch_size
+
+
+def _update_cosmos_config(config: dict[str, Any], geometry: A100TrainGeometry) -> None:
+    """Update values parsed directly by Cosmos-RL workers."""
+    config["mode"] = "disaggregated"
+    train = _mapping(config, "train")
+    train.update(
+        {
+            "train_batch_per_replica": geometry.train_batch_per_replica,
+            "max_num_steps": geometry.max_num_steps,
+            "epoch": geometry.num_epochs,
+            "optm_lr": geometry.learning_rate,
+            "optm_warmup_steps": geometry.warmup_steps,
+            "optm_decay_type": "cosine",
+            "optm_decay_ratio": 1.0,
+            "optm_min_lr_factor": 0.1,
+            "optm_grad_norm_clip": geometry.grad_norm_clip,
+        }
+    )
+    checkpoint = _mapping(train, "ckpt")
+    checkpoint.update(
+        {
+            "enable_checkpoint": True,
+            "save_freq": geometry.save_freq,
+            "export_safetensors": False,
+            "max_keep": 3,
+        }
+    )
+    train_policy = _mapping(train, "train_policy")
+    train_policy.update(
+        {
+            "allowed_outdated_steps": geometry.allowed_outdated_steps,
+            "on_policy": False,
+            "mini_batch": geometry.mini_batch,
+            "epsilon_low": geometry.ratio_clip,
+            "epsilon_high": geometry.ratio_clip,
+            "mu_iterations": 1,
+            "kl_beta": 0.0,
+            "reference_reset_interval": 0,
+        }
+    )
+
+    policy_parallelism = _mapping(_mapping(config, "policy"), "parallelism")
+    policy_parallelism["dp_shard_size"] = 1
+    rollout = _mapping(config, "rollout")
+    rollout.update(
+        {
+            "n_generation": geometry.n_generation,
+            "batch_size": geometry.rollout_batch_size,
+            "prefetch_rollout": False,
+        }
+    )
+    _mapping(config, "logging")["experiment_name"] = geometry.experiment_name
+
+
+def _mapping(parent: dict[str, Any], key: str) -> dict[str, Any]:
+    value = parent.get(key)
+    if not isinstance(value, dict):
+        raise TypeError(
+            f"Expected config field {key!r} to be a mapping, got {type(value).__name__}"
+        )
+    return value
+
+
+def _backup_once(path: Path) -> None:
+    backup_path = path.with_name(f"{path.name}.pre_autovla_4gpu")
+    if not backup_path.exists():
+        shutil.copy2(path, backup_path)
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    temporary_path = path.with_name(f".{path.name}.tmp")
+    temporary_path.write_text(content, encoding="utf-8")
+    temporary_path.replace(path)
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--policy-replicas", type=int, default=3)
+    parser.add_argument("--rollout-replicas", type=int, default=1)
+    parser.add_argument("--n-generation", type=int, default=8)
+    parser.add_argument("--rollout-batch-size", type=int, default=3)
+    parser.add_argument("--train-batch-per-replica", type=int, default=8)
+    parser.add_argument("--mini-batch", type=int, default=2)
+    parser.add_argument("--max-inference-batch-size", type=int, default=3)
+    parser.add_argument("--max-num-steps", type=int, default=916)
+    parser.add_argument("--num-epochs", type=int, default=3)
+    parser.add_argument("--learning-rate", type=float, default=1.0e-6)
+    parser.add_argument("--warmup-steps", type=int, default=20)
+    parser.add_argument("--ratio-clip", type=float, default=0.1)
+    parser.add_argument("--allowed-outdated-steps", type=int, default=1)
+    parser.add_argument("--save-freq", type=int, default=50)
+    parser.add_argument("--grad-norm-clip", type=float, default=1.0)
+    parser.add_argument("--experiment-name", default="autovla_a100_4gpu_grpo")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = _parse_args(argv)
+    geometry = A100TrainGeometry(
+        policy_replicas=args.policy_replicas,
+        rollout_replicas=args.rollout_replicas,
+        n_generation=args.n_generation,
+        rollout_batch_size=args.rollout_batch_size,
+        train_batch_per_replica=args.train_batch_per_replica,
+        mini_batch=args.mini_batch,
+        max_inference_batch_size=args.max_inference_batch_size,
+        max_num_steps=args.max_num_steps,
+        num_epochs=args.num_epochs,
+        learning_rate=args.learning_rate,
+        warmup_steps=args.warmup_steps,
+        ratio_clip=args.ratio_clip,
+        allowed_outdated_steps=args.allowed_outdated_steps,
+        save_freq=args.save_freq,
+        grad_norm_clip=args.grad_norm_clip,
+        experiment_name=args.experiment_name,
+    )
+    configure_autovla_a100_run(args.run_dir.resolve(), geometry)
+    produced = (
+        geometry.rollout_replicas * geometry.rollout_batch_size * geometry.n_generation
+    )
+    print(
+        "Configured AutoVLA four-A100 GRPO: "
+        f"policy={geometry.policy_replicas}, rollout={geometry.rollout_replicas}, "
+        f"global_episodes={produced}, n_generation={geometry.n_generation}, "
+        f"train_batch_per_replica={geometry.train_batch_per_replica}, "
+        f"mini_batch={geometry.mini_batch}, lr={geometry.learning_rate:g}"
+    )
+
+
+if __name__ == "__main__":
+    main()
