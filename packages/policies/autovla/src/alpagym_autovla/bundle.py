@@ -83,6 +83,7 @@ def build_data_packer(run_config: Any, cosmos_role: str | None) -> Any:
         set_trainer_config(
             model_path=str(vlm_path),
             action_start_id=bc.get("action_start_id", 151665),
+            action_token_count=bc.get("action_token_count", 2048),
             num_poses=bc.get("trajectory", {}).get("num_poses", 10),
             use_cot=bc.get("use_cot", False),
         )

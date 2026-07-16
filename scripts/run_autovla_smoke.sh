@@ -71,7 +71,7 @@ if [ -z "${HF_TOKEN:-}" ]; then
   fi
 fi
 
-EXPERIMENT="${EXPERIMENT:-autovla_local_smoke}"
+EXPERIMENT="${EXPERIMENT:-autovla_local_1gpu_smoke}"
 REWARD="${REWARD:-progress_safety}"
 MODEL_PATH="${MODEL_PATH:-/mnt/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Qwen/Qwen2.5-VL-3B-Instruct}"
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-/mnt/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Zewei-Zhou/AutoVLA/AutoVLA_PDMS_89.ckpt}"

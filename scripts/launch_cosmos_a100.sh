@@ -49,7 +49,7 @@ sed -i \
   -e 's|max_num_steps: .*|max_num_steps: 916|' \
   -e 's|num_epochs: .*|num_epochs: 3|' \
   -e 's|save_freq: .*|save_freq: 50|' \
-  -e 's|experiment_name: autovla_local_smoke|experiment_name: autovla_full_train|' \
+  -e 's|experiment_name: autovla_local_1gpu_smoke|experiment_name: autovla_full_train|' \
   "$LATEST_DIR/resolved_config.yaml"
 
 echo "  max_num_steps=916, epoch=3, save_freq=50, n_generation=4, batch=4, max_response=500, dp_shard=1"

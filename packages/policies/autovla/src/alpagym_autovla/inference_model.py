@@ -12,14 +12,15 @@ Key differences from Alpamayo R1:
 
 from __future__ import annotations
 
+import io
 import logging
 from dataclasses import asdict
 from typing import Any, Mapping
 
-import numpy as np
 import torch
 from PIL import Image
 
+from alpagym_autovla.action_tokens import action_token_mask, ensure_action_token_layout
 from alpagym_host.config import SamplingParamsConfig
 from alpagym_runtime.inference.types import (
     BatchedModelInput,
@@ -79,14 +80,17 @@ class AutoVLAInferenceModel:
         else:
             self._code_book = torch.tensor(codebook)
 
-        # Add action tokens to tokenizer if not already present
         n_bins = self._code_book.shape[0]
-        existing_tokens = set(self._processor.tokenizer.get_vocab().keys())
-        new_tokens = [f"<action_{i}>" for i in range(n_bins)
-                      if f"<action_{i}>" not in existing_tokens]
-        if new_tokens:
-            self._processor.tokenizer.add_tokens(new_tokens, special_tokens=False)
-            self._vlm.resize_token_embeddings(len(self._processor.tokenizer))
+        self._action_token_ids = ensure_action_token_layout(
+            self._processor.tokenizer,
+            action_start_id=action_start_id,
+            n_bins=n_bins,
+            source="AutoVLA rollout tokenizer",
+        )
+        self._action_token_id_to_index = {
+            int(token_id): index for index, token_id in enumerate(self._action_token_ids.tolist())
+        }
+        self._ensure_embedding_rows_cover_tokenizer()
 
     def get_model(self) -> torch.nn.Module:
         return self._vlm
@@ -203,10 +207,17 @@ class AutoVLAInferenceModel:
             if completion_ids[0, -1].item() == eos_id:
                 completion_ids = completion_ids[:, :-1]
 
-        action_tokens = completion_ids[0][completion_ids[0] >= self._action_start_id]
+        raw_action_tokens = completion_ids[0][self._action_token_mask(completion_ids[0])]
+        action_tokens = raw_action_tokens
         if len(action_tokens) > self._num_poses:
             action_tokens = action_tokens[:self._num_poses]
         elif len(action_tokens) < self._num_poses:
+            logger.warning(
+                "AutoVLA generated only %d/%d action tokens; padding trajectory decode "
+                "with codebook index 0. Check tokenizer/checkpoint compatibility if this repeats.",
+                len(action_tokens),
+                self._num_poses,
+            )
             pad = torch.zeros(
                 self._num_poses - len(action_tokens),
                 dtype=action_tokens.dtype,
@@ -232,7 +243,7 @@ class AutoVLAInferenceModel:
         else:
             self._log_counter = 0
         if self._log_counter <= 5 or self._log_counter % 20 == 0:
-            n_action = (completion_ids[0] >= self._action_start_id).sum().item()
+            n_action = int(raw_action_tokens.numel())
             logger.info(
                 "AutoVLA decode: completion_len=%d n_action_tokens=%d "
                 "action_tokens_raw=%s action_indices=%s "
@@ -240,7 +251,7 @@ class AutoVLAInferenceModel:
                 completion_ids.shape[1],
                 n_action,
                 action_tokens.tolist()[:5],
-                [int(t.item() - self._action_start_id) if t.item() >= self._action_start_id else -1 for t in action_tokens[:5]],
+                [self._action_token_id_to_index.get(int(t.item()), -1) for t in action_tokens[:5]],
                 [[f"{v:.4f}" for v in row] for row in trajectory[:3].tolist()],
                 [[f"{v:.4f}" for v in row] for row in trajectory[-3:].tolist()],
                 [[f"{v:.4f}" for v in row] for row in pred_xyz[:3].tolist()],
@@ -443,12 +454,7 @@ class AutoVLAInferenceModel:
         # Decode token IDs to codebook indices
         action_indices = []
         for tid in token_ids:
-            if tid < self._action_start_id:
-                action_indices.append(0)
-            else:
-                # Parse action index from token ID
-                # Token ID = action_start_id + index
-                action_indices.append(int(tid.item() - self._action_start_id))
+            action_indices.append(self._action_token_id_to_index.get(int(tid.item()), 0))
 
         action_indices = torch.tensor(action_indices)
         action_tokens = self._code_book[action_indices]  # (T, 6, 4, 2)
@@ -493,9 +499,9 @@ class AutoVLAInferenceModel:
     ) -> torch.Tensor:
         """Compute sum of per-token logprobs for the generated action tokens.
 
-        Only action tokens (>= action_start_id) in the completion are summed,
-        matching the trainer-side _compute_action_logprobs which also only
-        scores action tokens.
+        Only exact AutoVLA action-token ids in the completion are summed,
+        matching the trainer-side _compute_action_logprobs which uses the
+        same validated token-id set.
         """
         with torch.no_grad():
             forward_kwargs = {
@@ -519,13 +525,37 @@ class AutoVLAInferenceModel:
         completion_ids = target_ids[:, prompt_length - 1:]  # (1, completion_len)
         completion_logps = per_token_logps[:, prompt_length - 1:]  # (1, completion_len)
 
-        action_mask = completion_ids >= self._action_start_id  # (1, completion_len)
+        action_mask = self._action_token_mask(completion_ids)  # (1, completion_len)
         if action_mask.any():
             logprob = completion_logps[action_mask].sum()
         else:
-            logprob = completion_logps.sum(dim=-1).squeeze(0)
+            logprob = completion_logps.new_zeros(())
 
         return logprob.squeeze() if logprob.dim() > 0 else logprob
+
+    def _action_token_mask(self, token_ids: torch.Tensor) -> torch.Tensor:
+        """Return a mask for the exact tokenizer ids used by AutoVLA actions."""
+        return action_token_mask(token_ids, self._action_token_ids)
+
+    def _ensure_embedding_rows_cover_tokenizer(self) -> None:
+        """Resize embeddings only when a valid tokenizer has more rows than the model."""
+        try:
+            tokenizer_size = len(self._processor.tokenizer)
+            embedding = self._vlm.get_input_embeddings()
+            if hasattr(embedding, "num_embeddings"):
+                num_embeddings = int(embedding.num_embeddings)
+            else:
+                num_embeddings = int(embedding.weight.shape[0])
+        except Exception as exc:
+            logger.debug("Could not inspect AutoVLA embedding/tokenizer sizes: %s", exc)
+            return
+        if num_embeddings < tokenizer_size:
+            logger.info(
+                "Resizing AutoVLA embeddings from %d to tokenizer size %d",
+                num_embeddings,
+                tokenizer_size,
+            )
+            self._vlm.resize_token_embeddings(tokenizer_size)
 
     def build_policy_replay_data(
         self,

@@ -20,6 +20,8 @@ from typing import Any
 
 import torch
 
+from alpagym_autovla.action_tokens import action_token_mask, ensure_action_token_layout
+
 logger = logging.getLogger(__name__)
 
 # Module-level config set by setup_tokenizer / install_autovla_runtime_bridge
@@ -29,15 +31,18 @@ _trainer_config: dict[str, Any] = {}
 def set_trainer_config(
     model_path: str,
     action_start_id: int = 151665,
+    action_token_count: int = 2048,
     num_poses: int = 10,
     use_cot: bool = False,
 ) -> None:
     """Store config needed by the patched training forward."""
     _trainer_config["model_path"] = Path(model_path)
     _trainer_config["action_start_id"] = action_start_id
+    _trainer_config["action_token_count"] = action_token_count
     _trainer_config["num_poses"] = num_poses
     _trainer_config["use_cot"] = use_cot
     _trainer_config["_processor"] = None  # lazy init
+    _trainer_config["_action_token_ids"] = None  # lazy validation
 
 
 def _get_processor():
@@ -48,6 +53,18 @@ def _get_processor():
             str(_trainer_config["model_path"])
         )
     return _trainer_config["_processor"]
+
+
+def _get_action_token_ids(device: torch.device) -> torch.Tensor:
+    """Return validated AutoVLA action-token ids on ``device``."""
+    if _trainer_config.get("_action_token_ids") is None:
+        _trainer_config["_action_token_ids"] = ensure_action_token_layout(
+            _get_processor().tokenizer,
+            action_start_id=int(_trainer_config.get("action_start_id", 151665)),
+            n_bins=int(_trainer_config.get("action_token_count", 2048)),
+            source="AutoVLA trainer tokenizer",
+        )
+    return _trainer_config["_action_token_ids"].to(device)
 
 
 def _find_qwen_model(cosmos_model: Any) -> Any:
@@ -217,8 +234,8 @@ def _compute_action_logprobs(
     If ``completion_ids`` is provided (the full generated completion including
     assistant prefix and any intermediate text), it is appended to the prompt
     so the model sees the same context as during rollout.  Only tokens with
-    IDs >= action_start_id contribute to the sum, matching the rollout-side
-    ``_compute_logprob``.
+    exact AutoVLA action-token ids contribute to the sum, matching the
+    rollout-side ``_compute_logprob``.
 
     If ``completion_ids`` is not available, falls back to appending only
     ``action_token_ids`` (less accurate for CoT models).
@@ -253,12 +270,12 @@ def _compute_action_logprobs(
     completion_part_ids = target_ids[:, prompt_length - 1:]
     completion_logps = per_token_logps[:, prompt_length - 1:]
 
-    action_start_id = _trainer_config.get("action_start_id", 151665)
-    action_mask = completion_part_ids >= action_start_id
+    action_ids = _get_action_token_ids(completion_part_ids.device)
+    action_mask = action_token_mask(completion_part_ids, action_ids)
     if action_mask.any():
         logprob = completion_logps[action_mask].sum()
     else:
-        logprob = completion_logps.sum(dim=-1).squeeze(0)
+        logprob = completion_logps.new_zeros(())
 
     return logprob.squeeze() if logprob.dim() > 0 else logprob
 
