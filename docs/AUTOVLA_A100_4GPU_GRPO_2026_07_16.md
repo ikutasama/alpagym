@@ -78,7 +78,7 @@ Do not restart the 5090 process. Confirm its tunnel loop is still running, then:
 ```bash
 cd /data/mnt_m62/10_personal/z59900495/workspace/alpagym
 git pull origin main
-bash scripts/launch_cosmos_a100.sh
+bash scripts/launch_cosmos_a100.sh 4gpu
 ```
 
 The script checks that A100 localhost port 5011 is reachable and that local port
@@ -89,19 +89,22 @@ workers plus one rollout worker on GPUs 0,1,2,3.
 For a short first run without changing code:
 
 ```bash
-MAX_NUM_STEPS=10 SAVE_FREQ=5 bash scripts/launch_cosmos_a100.sh
+MAX_NUM_STEPS=10 SAVE_FREQ=5 bash scripts/launch_cosmos_a100.sh 4gpu
 ```
 
-For a lower-memory fallback:
+For a lower-memory fallback, copy the four-GPU profile, change `mini_batch` to
+1, and launch the copied profile explicitly:
 
 ```bash
-MINI_BATCH=1 bash scripts/launch_cosmos_a100.sh
+cp packages/policies/autovla/src/alpagym_autovla/configs/a100/autovla_a100_4gpu.yaml /tmp/autovla_a100_4gpu_mb1.yaml
+sed -i 's/mini_batch: 2/mini_batch: 1/' /tmp/autovla_a100_4gpu_mb1.yaml
+bash scripts/launch_cosmos_a100.sh /tmp/autovla_a100_4gpu_mb1.yaml
 ```
 
 If this specific A100 host cannot use GPU P2P, retry with:
 
 ```bash
-NCCL_P2P_DISABLE=1 bash scripts/launch_cosmos_a100.sh
+NCCL_P2P_DISABLE=1 bash scripts/launch_cosmos_a100.sh 4gpu
 ```
 
 ## What to verify in logs
@@ -110,7 +113,7 @@ Before trusting a training curve, verify all of the following:
 
 ```text
 launcher: --policy 3 --rollout 1
-Configured AutoVLA four-A100 GRPO: ... global_episodes=24 ...
+Configured AutoVLA A100 profile 'autovla_a100_4gpu_grpo': ... global_episodes=24 ...
 NCCL writer/receiver setup completes for 3 policy ranks and 1 rollout rank
 rollout_generation: 3 payloads
 each RolloutResult has 8 completions (no Partial rollout warning)

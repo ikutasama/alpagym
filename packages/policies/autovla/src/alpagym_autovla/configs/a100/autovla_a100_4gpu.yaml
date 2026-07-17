@@ -1,0 +1,26 @@
+# Three policy workers use GPUs 0-2 and one rollout worker uses GPU 3. The
+# rollout worker is the only Egodriver server on port 5012; replay from rollout
+# to policy stays local to the A100 host over NCCL.
+name: autovla_a100_4gpu_grpo
+cuda_visible_devices: "0,1,2,3"
+mode: disaggregated
+transport: nccl
+
+policy_replicas: 3
+rollout_replicas: 1
+
+# Three prompt groups x eight candidates match three policy batches of eight.
+n_generation: 8
+rollout_batch_size: 3
+train_batch_per_replica: 8
+mini_batch: 2
+max_inference_batch_size: 3
+
+max_num_steps: 916
+num_epochs: 3
+learning_rate: 1.0e-6
+warmup_steps: 20
+ratio_clip: 0.1
+allowed_outdated_steps: 1
+save_freq: 50
+grad_norm_clip: 1.0

@@ -1,0 +1,26 @@
+# One policy and one rollout worker share GPU 0. Disk replay is required by the
+# current colocated Cosmos packer. The external AlpaSim runtime remains on 5011
+# and the single Egodriver reverse tunnel remains on 5012.
+name: autovla_a100_1gpu_grpo
+cuda_visible_devices: "0"
+mode: colocated
+transport: disk
+
+policy_replicas: 1
+rollout_replicas: 1
+
+# One prompt group with eight candidates gives one complete GRPO group/update.
+n_generation: 8
+rollout_batch_size: 1
+train_batch_per_replica: 8
+mini_batch: 1
+max_inference_batch_size: 1
+
+max_num_steps: 916
+num_epochs: 3
+learning_rate: 1.0e-6
+warmup_steps: 20
+ratio_clip: 0.1
+allowed_outdated_steps: 1
+save_freq: 50
+grad_norm_clip: 1.0

@@ -4,46 +4,51 @@ set -euo pipefail
 LATEST_DIR=/data/mnt_m62/10_personal/z59900495/workspace/latest
 ALPAGYM_DIR=/data/mnt_m62/10_personal/z59900495/workspace/alpagym
 TMPDIR=/data/mnt_m62/10_personal/z59900495/workspace/tmp
-
-# Four-A100 layout with the existing single 5012 reverse tunnel:
-#   GPUs 0-2: three synchronized policy replicas
-#   GPU 3:    one rollout replica / one Egodriver server on port 5012
-# The rollout worker dispatches 3 prompt groups x 8 generations = 24 episodes,
-# matching 3 policy replicas x 8 episodes per replica.
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
-POLICY_REPLICAS="${POLICY_REPLICAS:-3}"
-ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-1}"
-N_GENERATION="${N_GENERATION:-8}"
-ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-3}"
-TRAIN_BATCH_PER_REPLICA="${TRAIN_BATCH_PER_REPLICA:-8}"
-MINI_BATCH="${MINI_BATCH:-2}"
-MAX_INFERENCE_BATCH_SIZE="${MAX_INFERENCE_BATCH_SIZE:-3}"
-MAX_NUM_STEPS="${MAX_NUM_STEPS:-916}"
-NUM_EPOCHS="${NUM_EPOCHS:-3}"
-LEARNING_RATE="${LEARNING_RATE:-1e-6}"
-WARMUP_STEPS="${WARMUP_STEPS:-20}"
-RATIO_CLIP="${RATIO_CLIP:-0.1}"
-ALLOWED_OUTDATED_STEPS="${ALLOWED_OUTDATED_STEPS:-1}"
-SAVE_FREQ="${SAVE_FREQ:-50}"
-GRAD_NORM_CLIP="${GRAD_NORM_CLIP:-1.0}"
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-autovla_a100_4gpu_grpo}"
 RUNTIME_PORT="${RUNTIME_PORT:-5011}"
 DRIVER_PORT="${DRIVER_PORT:-5012}"
 
-IFS=',' read -r -a GPU_IDS <<< "$CUDA_VISIBLE_DEVICES"
-EXPECTED_GPU_COUNT=$((POLICY_REPLICAS + ROLLOUT_REPLICAS))
-if [ "${#GPU_IDS[@]}" -ne "$EXPECTED_GPU_COUNT" ]; then
-  echo "ERROR: CUDA_VISIBLE_DEVICES exposes ${#GPU_IDS[@]} GPUs, but policy + rollout" \
-    "requires ${EXPECTED_GPU_COUNT}." >&2
-  exit 2
-fi
-if [ "$ROLLOUT_REPLICAS" -ne 1 ]; then
-  echo "ERROR: the current 5012 tunnel supports one rollout/Egodriver process." \
-    "Add driver ports and tunnels before increasing ROLLOUT_REPLICAS." >&2
+if [ "$#" -gt 1 ]; then
+  echo "Usage: $0 [1gpu|4gpu|/path/to/profile.yaml]" >&2
   exit 2
 fi
 
-echo "[1/4] Fixing paths in resolved_config.yaml and cosmos_config.toml ..."
+PROFILE_SELECTOR="${1:-${AUTOVLA_A100_PROFILE:-4gpu}}"
+case "$PROFILE_SELECTOR" in
+  1gpu)
+    PROFILE_PATH="$ALPAGYM_DIR/packages/policies/autovla/src/alpagym_autovla/configs/a100/autovla_a100_1gpu.yaml"
+    ;;
+  4gpu)
+    PROFILE_PATH="$ALPAGYM_DIR/packages/policies/autovla/src/alpagym_autovla/configs/a100/autovla_a100_4gpu.yaml"
+    ;;
+  *)
+    PROFILE_PATH="$PROFILE_SELECTOR"
+    ;;
+esac
+if [ ! -f "$PROFILE_PATH" ]; then
+  echo "ERROR: AutoVLA A100 profile not found: $PROFILE_PATH" >&2
+  exit 2
+fi
+
+cd "$ALPAGYM_DIR"
+PROFILE_FIELDS=$(UV_NO_MANAGED_PYTHON=1 UV_PYTHON="$(command -v python)" \
+  uv run --no-sync --all-packages python -m alpagym_host.autovla_a100_config \
+  --profile "$PROFILE_PATH" --print-launch-fields)
+IFS=$'\t' read -r PROFILE_CUDA POLICY_REPLICAS ROLLOUT_REPLICAS COSMOS_MODE TRANSPORT_KIND PROFILE_NAME <<< "$PROFILE_FIELDS"
+CUDA_VISIBLE_DEVICES="$PROFILE_CUDA"
+
+IFS=',' read -r -a GPU_IDS <<< "$CUDA_VISIBLE_DEVICES"
+if [ "$COSMOS_MODE" = "colocated" ]; then
+  EXPECTED_GPU_COUNT=1
+else
+  EXPECTED_GPU_COUNT=$((POLICY_REPLICAS + ROLLOUT_REPLICAS))
+fi
+if [ "${#GPU_IDS[@]}" -ne "$EXPECTED_GPU_COUNT" ]; then
+  echo "ERROR: profile $PROFILE_NAME ($COSMOS_MODE) requires $EXPECTED_GPU_COUNT visible" \
+    "GPU(s), but CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES exposes ${#GPU_IDS[@]}." >&2
+  exit 2
+fi
+
+echo "[1/4] Loading $PROFILE_NAME and fixing copied-run paths ..."
 sed -i \
   -e 's|tmp/alpagym-runs/[^/]*/|'"$LATEST_DIR"'/|g' \
   -e 's|/mnt/mnt_m62|/data/mnt_m62|g' \
@@ -60,27 +65,18 @@ sed -i \
   -e 's|/mnt/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Zewei-Zhou/AutoVLA/AutoVLA_PDMS_89.ckpt|/tmp/model/AutoVLA/AutoVLA_PDMS_89.ckpt|g' \
   "$LATEST_DIR/cosmos_config.toml"
 
-echo "[2/4] Configuring matched four-GPU rollout and policy geometry ..."
+echo "[2/4] Configuring matched rollout and policy geometry ..."
 cd "$ALPAGYM_DIR"
+CONFIG_ARGS=(--profile "$PROFILE_PATH" --run-dir "$LATEST_DIR")
+if [ -n "${MAX_NUM_STEPS:-}" ]; then
+  CONFIG_ARGS+=(--max-num-steps "$MAX_NUM_STEPS")
+fi
+if [ -n "${SAVE_FREQ:-}" ]; then
+  CONFIG_ARGS+=(--save-freq "$SAVE_FREQ")
+fi
 UV_NO_MANAGED_PYTHON=1 UV_PYTHON="$(command -v python)" \
 uv run --no-sync --all-packages python -m alpagym_host.autovla_a100_config \
-  --run-dir "$LATEST_DIR" \
-  --policy-replicas "$POLICY_REPLICAS" \
-  --rollout-replicas "$ROLLOUT_REPLICAS" \
-  --n-generation "$N_GENERATION" \
-  --rollout-batch-size "$ROLLOUT_BATCH_SIZE" \
-  --train-batch-per-replica "$TRAIN_BATCH_PER_REPLICA" \
-  --mini-batch "$MINI_BATCH" \
-  --max-inference-batch-size "$MAX_INFERENCE_BATCH_SIZE" \
-  --max-num-steps "$MAX_NUM_STEPS" \
-  --num-epochs "$NUM_EPOCHS" \
-  --learning-rate "$LEARNING_RATE" \
-  --warmup-steps "$WARMUP_STEPS" \
-  --ratio-clip "$RATIO_CLIP" \
-  --allowed-outdated-steps "$ALLOWED_OUTDATED_STEPS" \
-  --save-freq "$SAVE_FREQ" \
-  --grad-norm-clip "$GRAD_NORM_CLIP" \
-  --experiment-name "$EXPERIMENT_NAME"
+  "${CONFIG_ARGS[@]}"
 
 echo "[3/4] Creating run directory symlinks on A100 ..."
 RUN_ID=$(grep -oP 'alpagym-runs/\K[^/]+' "$LATEST_DIR/resolved_config.yaml" 2>/dev/null | head -1 || true)
@@ -104,13 +100,18 @@ export GRPC_ARG_ENABLE_HTTP_PROXY=0 no_proxy='localhost,127.0.0.1,0.0.0.0' NO_PR
 export TMPDIR="$TMPDIR" GLOO_TIMEOUT_SECONDS="${GLOO_TIMEOUT_SECONDS:-3600}"
 export ALPAGYM_DRIVER_HOST=localhost ALPAGYM_DRIVER_PORT="$DRIVER_PORT"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
-export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-0}"
-export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
-export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
-export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-^lo,^docker}"
-export NCCL_TIMEOUT="${NCCL_TIMEOUT:-1800}"
-export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-0}"
-export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
+if [ "$TRANSPORT_KIND" = "nccl" ]; then
+  export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-0}"
+  export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
+  export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
+  export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-^lo,^docker}"
+  export NCCL_TIMEOUT="${NCCL_TIMEOUT:-1800}"
+  export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-0}"
+  export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
+else
+  unset NCCL_SHM_DISABLE NCCL_DEBUG NCCL_IB_DISABLE NCCL_SOCKET_IFNAME
+  unset NCCL_TIMEOUT NCCL_P2P_DISABLE TORCH_NCCL_ASYNC_ERROR_HANDLING
+fi
 export CUDA_VISIBLE_DEVICES
 
 python - "$RUNTIME_PORT" "$DRIVER_PORT" <<'PY'
