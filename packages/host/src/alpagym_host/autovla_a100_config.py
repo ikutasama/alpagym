@@ -265,6 +265,18 @@ def _update_resolved_config(config: dict[str, Any], profile: A100LaunchProfile) 
         }
     )
 
+    # Always use progress_safety reward for closed-loop GRPO: rewards progress,
+    # penalizes collision/offroad, plus a small GT-deviation term.
+    config["reward"] = {
+        "terms": [
+            {"kind": "metric", "metric_name": "progress", "scale": 1.0},
+            {"kind": "metric", "metric_name": "collision_any", "scale": -10.0},
+            {"kind": "metric", "metric_name": "offroad", "scale": -5.0},
+            {"kind": "distance_to_gt", "scale": -0.01},
+        ]
+    }
+
+
     cosmos = _mapping(config, "cosmos")
     cosmos["mode"] = profile.mode
 
