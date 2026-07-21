@@ -173,6 +173,14 @@ def main(argv: list[str] | None = None) -> None:
             to this script; only ``--config`` is read here, the rest is
             ignored locally and re-parsed by Cosmos.
     """
+    _tmpdir = os.environ.get(
+        "TMPDIR", "/data/mnt_m62/10_personal/z59900495/workspace/tmp"
+    )
+    os.environ["TMPDIR"] = _tmpdir
+    os.makedirs(_tmpdir, exist_ok=True)
+    import tempfile
+    tempfile.tempdir = _tmpdir
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     args, _ = parser.parse_known_args(argv)
