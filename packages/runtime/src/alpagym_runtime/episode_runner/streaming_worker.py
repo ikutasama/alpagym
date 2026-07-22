@@ -254,6 +254,9 @@ class StreamingRolloutWorker:
             self._on_rollout_succeeded(rollout_job, episode)
         except Exception as exc:
             self._on_rollout_failed(rollout_job, exc)
+        finally:
+            import torch
+            torch.cuda.empty_cache()
 
     def _on_rollout_succeeded(self, rollout_job: _RolloutJob, episode: EpisodeOutput) -> None:
         """Append the episode; resolve the future when `n_target` siblings land."""

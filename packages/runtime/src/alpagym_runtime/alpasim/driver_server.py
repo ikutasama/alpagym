@@ -210,8 +210,14 @@ class EgodriverGrpcServicer:
             calibration=session.calibration,
             tick_buffer=snapshot,
         )
-        with timed_scope("driver/policy_step", category="compute_gpu_wall", gpu_snapshot=True):
-            policy_output = session.policy.step(policy_input)
+        try:
+            with timed_scope("driver/policy_step", category="compute_gpu_wall", gpu_snapshot=True):
+                policy_output = session.policy.step(policy_input)
+        except Exception as oom_exc:
+            import torch
+            logger.warning("CUDA error in drive() step %d: %s; clearing cache", step_index, oom_exc)
+            torch.cuda.empty_cache()
+            context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, f"CUDA error in policy step: {oom_exc}")
         session.record_step(policy_input, policy_output)
         return drive_response_from_policy_output(policy_input, policy_output)
 
