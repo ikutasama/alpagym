@@ -112,8 +112,10 @@ def _build_qwen_inputs_for_training(
     if ego_history_xyz.shape[0] >= 2:
         diff = ego_history_xyz[1:] - ego_history_xyz[:-1]
         velocity = float(torch.norm(diff[-1][:2]).item())
-        acceleration = float(torch.norm(diff[-1][:2] - diff[-2][:2]).item()
-                             if diff.shape[0] >= 2 else 0.0)
+        if diff.shape[0] >= 2:
+            acceleration = float(torch.norm(diff[-1][:2] - diff[-2][:2]).item())
+        else:
+            acceleration = 0.0
     else:
         velocity = 0.0
         acceleration = 0.0
@@ -280,22 +282,185 @@ def _compute_action_logprobs(
     return logprob.squeeze() if logprob.dim() > 0 else logprob
 
 
+def _compute_action_logprobs_from_qwen_inputs(
+    qwen_model: Any,
+    qwen_inputs: dict[str, torch.Tensor],
+    prompt_length: int,
+    action_token_ids: torch.Tensor,
+    completion_ids: torch.Tensor | None = None,
+    teacher_model: Any | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Compute action log-probs using the exact Qwen inputs from rollout.
+
+    Uses the persisted ``qwen_inputs`` (input_ids, pixel_values,
+    image_grid_thw, etc.) and ``prompt_length`` so the trainer scores
+    the same token alignment the rollout used — no rebuilding.
+
+    When ``teacher_model`` is provided, also computes per-sample KL
+    divergence between the current and reference policy over the action
+    tokens.
+    """
+    prompt_ids = qwen_inputs["input_ids"]  # [1, prompt_len]
+
+    if completion_ids is not None:
+        comp_ids = completion_ids.to(prompt_ids.dtype).to(prompt_ids.device)
+        if comp_ids.dim() == 1:
+            comp_ids = comp_ids.unsqueeze(0)
+        prompt_completion_ids = torch.cat([prompt_ids, comp_ids], dim=1)
+    else:
+        act_ids = action_token_ids.to(prompt_ids.dtype).to(prompt_ids.device)
+        if act_ids.dim() == 1:
+            act_ids = act_ids.unsqueeze(0)
+        prompt_completion_ids = torch.cat([prompt_ids, act_ids], dim=1)
+
+    forward_kwargs = {
+        k: v for k, v in qwen_inputs.items()
+        if k not in ("input_ids", "attention_mask", "prompt_length")
+    }
+    outputs = qwen_model(
+        input_ids=prompt_completion_ids,
+        attention_mask=torch.ones_like(prompt_completion_ids),
+        **forward_kwargs,
+    )
+    logits = outputs.logits  # [1, L, V]
+
+    logits = logits[:, :-1, :]  # [1, L-1, V]
+    target_ids = prompt_completion_ids[:, 1:]  # [1, L-1]
+
+    log_probs = torch.log_softmax(logits, dim=-1)  # [1, L-1, V]
+    per_token_logps = log_probs.gather(2, target_ids.unsqueeze(-1)).squeeze(-1)  # [1, L-1]
+
+    completion_part_ids = target_ids[:, prompt_length - 1:]
+    completion_logps = per_token_logps[:, prompt_length - 1:]
+
+    action_ids = _get_action_token_ids(completion_part_ids.device)
+    action_mask = action_token_mask(completion_part_ids, action_ids)
+    if action_mask.any():
+        logprob = completion_logps[action_mask].sum()
+    else:
+        logprob = completion_logps.new_zeros(())
+
+    logprob_out = logprob.squeeze() if logprob.dim() > 0 else logprob
+
+    kl_div = None
+    if teacher_model is not None:
+        with torch.no_grad():
+            ref_outputs = teacher_model(
+                input_ids=prompt_completion_ids,
+                attention_mask=torch.ones_like(prompt_completion_ids),
+                **forward_kwargs,
+            )
+            ref_logits = ref_outputs.logits[:, :-1, :]
+            ref_log_probs = torch.log_softmax(ref_logits, dim=-1)
+            ref_per_token_logps = ref_log_probs.gather(2, target_ids.unsqueeze(-1)).squeeze(-1)
+            ref_completion_logps = ref_per_token_logps[:, prompt_length - 1:]
+
+            if action_mask.any():
+                cur_lp = completion_logps[action_mask]
+                ref_lp = ref_completion_logps[action_mask]
+                kl_div = (cur_lp.exp() * (cur_lp - ref_lp)).sum()
+            else:
+                kl_div = completion_logps.new_zeros(())
+            kl_div = kl_div.squeeze() if kl_div.dim() > 0 else kl_div
+
+    return logprob_out, kl_div
+
+
 def autovla_training_forward(
     trainer: Any,
     model_inputs: dict[str, Any],
+    teacher_model: Any | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """AutoVLA training forward: rebuild Qwen inputs, compute action log_probs.
+    """AutoVLA training forward: compute action log_probs using persisted Qwen inputs.
 
-    Returns ``(log_probs, None)`` where ``log_probs`` is ``[B]``.
+    When the rollout persisted its Qwen processor inputs (``qwen_inputs``),
+    those are used directly — guaranteeing token-level alignment with the
+    rollout-side logprob.  Otherwise, falls back to rebuilding from raw
+    camera frames (legacy path, less accurate).
+
+    When ``teacher_model`` is provided, also computes per-sample KL
+    divergence between the current and reference policy over the action
+    tokens.
+
+    Returns ``(log_probs, kl_divs)`` where ``log_probs`` is ``[B]`` and
+    ``kl_divs`` is ``[B]`` or ``None``.
     """
-    camera_frames = model_inputs["camera_frames"]
-    ego_history_xyz = model_inputs["ego_history_xyz"]
-    route_xy = model_inputs.get("route_xy")
+    qwen_inputs_list = model_inputs.get("qwen_inputs")
     action_token_ids = model_inputs.get("action_token_ids")
     completion_ids = model_inputs.get("completion_ids")
 
+    qwen_model = _find_qwen_model(trainer.model)
+    device = next(qwen_model.parameters()).device
+    ref_qwen = _find_qwen_model(teacher_model) if teacher_model is not None else None
+
+    if qwen_inputs_list is not None:
+        if isinstance(qwen_inputs_list, dict):
+            stacked_qi = qwen_inputs_list
+            first_tensor = next(
+                (v for v in stacked_qi.values() if isinstance(v, torch.Tensor)),
+                None,
+            )
+            batch_size = first_tensor.shape[0] if first_tensor is not None else 1
+            qwen_inputs_per_sample = []
+            for b in range(batch_size):
+                sample_qi: dict[str, Any] = {}
+                for k, v in stacked_qi.items():
+                    if isinstance(v, torch.Tensor) and v.shape[0] == batch_size:
+                        sample_qi[k] = v[b]
+                    elif isinstance(v, torch.Tensor):
+                        sample_qi[k] = v
+                    else:
+                        sample_qi[k] = v
+                qwen_inputs_per_sample.append(sample_qi)
+            qwen_inputs_list = qwen_inputs_per_sample
+        if not isinstance(qwen_inputs_list, list):
+            qwen_inputs_list = [qwen_inputs_list]
+        batch_size = len(qwen_inputs_list)
+        logger.info(
+            "AutoVLA training forward: using persisted qwen_inputs, batch=%d, "
+            "action_token_ids=%s, completion_ids=%s, has_teacher=%s",
+            batch_size,
+            tuple(action_token_ids.shape) if action_token_ids is not None else None,
+            tuple(completion_ids.shape) if completion_ids is not None else None,
+            ref_qwen is not None,
+        )
+        all_logprobs: list[torch.Tensor] = []
+        all_kl_divs: list[torch.Tensor] = []
+        for b in range(batch_size):
+            qwen_inputs = {
+                k: v.to(device) if isinstance(v, torch.Tensor) else v
+                for k, v in qwen_inputs_list[b].items()
+            }
+            prompt_length = int(qwen_inputs.pop("prompt_length"))
+            if action_token_ids is not None:
+                act_ids = action_token_ids
+                if act_ids.dim() == 1:
+                    act_ids = act_ids.unsqueeze(0)
+                comp_ids = completion_ids
+                if comp_ids is not None and comp_ids.dim() == 1:
+                    comp_ids = comp_ids.unsqueeze(0)
+                logprob, kl_div = _compute_action_logprobs_from_qwen_inputs(
+                    qwen_model, qwen_inputs, prompt_length,
+                    act_ids[b] if act_ids.dim() > 1 else act_ids[0],
+                    comp_ids[b] if comp_ids is not None and comp_ids.dim() > 1 else comp_ids,
+                    teacher_model=ref_qwen,
+                )
+            else:
+                logprob = torch.tensor(0.0, device=device)
+                kl_div = None
+            all_logprobs.append(logprob)
+            if kl_div is not None:
+                all_kl_divs.append(kl_div)
+        log_probs = torch.stack(all_logprobs)
+        kl_divs = torch.stack(all_kl_divs) if all_kl_divs else None
+        return log_probs, kl_divs
+
+    camera_frames = model_inputs["camera_frames"]
+    ego_history_xyz = model_inputs["ego_history_xyz"]
+    route_xy = model_inputs.get("route_xy")
+
     logger.info(
-        "AutoVLA training forward shapes: camera_frames=%s dtype=%s, "
+        "AutoVLA training forward (legacy rebuild): camera_frames=%s dtype=%s, "
         "ego_history_xyz=%s, route_xy=%s, action_token_ids=%s, completion_ids=%s",
         tuple(camera_frames.shape), camera_frames.dtype,
         tuple(ego_history_xyz.shape),
@@ -316,10 +481,8 @@ def autovla_training_forward(
         completion_ids = completion_ids.unsqueeze(0)
 
     batch_size = camera_frames.shape[0]
-    qwen_model = _find_qwen_model(trainer.model)
-    device = next(qwen_model.parameters()).device
 
-    all_logprobs: list[torch.Tensor] = []
+    all_logprobs = []
     for b in range(batch_size):
         qwen_inputs = _build_qwen_inputs_for_training(
             camera_frames[b],
@@ -336,7 +499,7 @@ def autovla_training_forward(
             logprob = torch.tensor(0.0, device=device)
         all_logprobs.append(logprob)
 
-    log_probs = torch.stack(all_logprobs)  # [B]
+    log_probs = torch.stack(all_logprobs)
     return log_probs, None
 
 
@@ -358,9 +521,14 @@ def patch_trainer_forward() -> None:
         self,
         model_inputs: dict[str, Any],
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        # AutoVLA path: camera_frames + action_token_ids present
-        if isinstance(model_inputs, dict) and "camera_frames" in model_inputs:
-            return autovla_training_forward(self, model_inputs)
+        # AutoVLA path: camera_frames or qwen_inputs present
+        if isinstance(model_inputs, dict) and (
+            "camera_frames" in model_inputs or "qwen_inputs" in model_inputs
+        ):
+            return autovla_training_forward(
+                self, model_inputs,
+                teacher_model=self._reference_model,
+            )
         # Original path for all other policies
         forward_kwargs = to_device_recursive(model_inputs, self.device)
         if self._reference_model is not None:

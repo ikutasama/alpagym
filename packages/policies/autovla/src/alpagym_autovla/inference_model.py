@@ -118,9 +118,10 @@ class AutoVLAInferenceModel:
         all_logprobs = []
         all_action_token_ids = []
         all_completion_ids = []
+        all_qwen_inputs = []
 
         for batch_idx in range(batch_size):
-            pred_xyz, pred_rot, logprob, action_token_ids, completion_ids = self._infer_single(
+            pred_xyz, pred_rot, logprob, action_token_ids, completion_ids, qwen_inputs = self._infer_single(
                 model_input, batch_idx, sampling, return_trace_for_rl
             )
             all_pred_xyz.append(pred_xyz)
@@ -131,6 +132,11 @@ class AutoVLAInferenceModel:
                 all_action_token_ids.append(action_token_ids)
             if completion_ids is not None:
                 all_completion_ids.append(completion_ids)
+            if qwen_inputs is not None:
+                all_qwen_inputs.append(qwen_inputs)
+            del pred_xyz, pred_rot, logprob, action_token_ids, completion_ids, qwen_inputs
+
+        torch.cuda.empty_cache()
 
         pred_xyz = torch.stack(all_pred_xyz, dim=0)  # [B, S, K, T, 3]
         pred_rot = torch.stack(all_pred_rot, dim=0)  # [B, S, K, T, 3, 3]
@@ -142,6 +148,8 @@ class AutoVLAInferenceModel:
             extra["completion_ids"] = torch.nn.utils.rnn.pad_sequence(
                 all_completion_ids, batch_first=True, padding_value=0
             )
+        if all_qwen_inputs:
+            extra["qwen_inputs"] = all_qwen_inputs
 
         return BatchedModelOutput(
             pred_xyz=pred_xyz,
@@ -199,6 +207,10 @@ class AutoVLAInferenceModel:
 
         prompt_length = model_inputs["input_ids"].size(1)
         completion_ids = prompt_completion_ids[:, prompt_length:]
+
+        if not return_trace_for_rl:
+            del model_inputs
+            torch.cuda.empty_cache()
 
         # 3. Extract action tokens
         # Remove trailing EOS token (same as original AutoVLA predict())
@@ -268,14 +280,22 @@ class AutoVLAInferenceModel:
         logprob = None
         action_token_ids_out = None
         completion_ids_out = None
+        qwen_inputs_out = None
         if return_trace_for_rl:
             logprob = self._compute_logprob(
                 model_inputs, prompt_completion_ids, prompt_length
             ).reshape(1, 1)
             action_token_ids_out = action_tokens.reshape(1, 1, -1).to(torch.int64).cpu()
             completion_ids_out = completion_ids[0].cpu()
+            qwen_inputs_out = {
+                k: v.cpu() if isinstance(v, torch.Tensor) else v
+                for k, v in model_inputs.items()
+            }
+            qwen_inputs_out["prompt_length"] = prompt_length
+            del model_inputs, prompt_completion_ids
+            torch.cuda.empty_cache()
 
-        return pred_xyz, pred_rot, logprob, action_token_ids_out, completion_ids_out
+        return pred_xyz, pred_rot, logprob, action_token_ids_out, completion_ids_out, qwen_inputs_out
 
     def _build_qwen_inputs(
         self,
@@ -313,8 +333,10 @@ class AutoVLAInferenceModel:
         if ego_history.shape[0] >= 2:
             diff = ego_history[1:] - ego_history[:-1]
             velocity = float(torch.norm(diff[-1][:2]).item())
-            acceleration = float(torch.norm(diff[-1][:2] - diff[-2][:2]).item()
-                                 if diff.shape[0] >= 2 else 0.0)
+            if diff.shape[0] >= 2:
+                acceleration = float(torch.norm(diff[-1][:2] - diff[-2][:2]).item())
+            else:
+                acceleration = 0.0
         else:
             velocity = 0.0
             acceleration = 0.0
@@ -582,13 +604,15 @@ class AutoVLAInferenceModel:
         }
         if "completion_ids" in model_output.extra:
             comp = model_output.extra["completion_ids"]
-            # After _split_extra_per_model_output, comp is already [T] (1D).
-            # The old code indexed comp[batch_idx] which took a single scalar
-            # (the first token) instead of the full sequence.  Only index if
-            # the tensor still has a batch dimension.
             if comp.dim() > 1:
                 comp = comp[0]
             payload["completion_ids"] = torch.as_tensor(comp, dtype=torch.int64)
+        if "qwen_inputs" in model_output.extra:
+            qwen_inputs_val = model_output.extra["qwen_inputs"]
+            if isinstance(qwen_inputs_val, dict):
+                payload["qwen_inputs"] = qwen_inputs_val
+            elif isinstance(qwen_inputs_val, list) and len(qwen_inputs_val) > 0:
+                payload["qwen_inputs"] = qwen_inputs_val[0]
         return PolicyReplayData(
             replay_schema_version=1,
             payload_schema="autovla.action_tokens.v1",
@@ -645,6 +669,17 @@ class AutoVLAInferenceModel:
         }
         if "completion_ids" in payload:
             model_inputs["completion_ids"] = torch.as_tensor(payload["completion_ids"], dtype=torch.int64)
+        if "qwen_inputs" in payload:
+            raw_qi = payload["qwen_inputs"]
+            qwen_inputs_rehydrated: dict[str, Any] = {}
+            for k, v in raw_qi.items():
+                if isinstance(v, list):
+                    qwen_inputs_rehydrated[k] = torch.as_tensor(v)
+                elif isinstance(v, torch.Tensor):
+                    qwen_inputs_rehydrated[k] = v
+                else:
+                    qwen_inputs_rehydrated[k] = v
+            model_inputs["qwen_inputs"] = qwen_inputs_rehydrated
         if replay_data.old_logprob is None:
             raise ValueError("autovla replay requires old_logprob")
         old_logprob = torch.as_tensor(replay_data.old_logprob, dtype=torch.float32).reshape(())

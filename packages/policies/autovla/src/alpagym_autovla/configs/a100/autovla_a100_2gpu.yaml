@@ -1,0 +1,26 @@
+# Policy on GPU 0, rollout + AlpaSim on GPU 1. Disaggregated mode gives the
+# rollout worker a dedicated GPU so the VLM + AlpaSim driver no longer compete
+# with the FSDP policy trainer for VRAM. Disk replay avoids NCCL complexity
+# on a two-GPU single-node setup.
+name: autovla_a100_2gpu_grpo
+cuda_visible_devices: "6,7"
+mode: disaggregated
+transport: disk
+
+policy_replicas: 1
+rollout_replicas: 1
+
+n_generation: 8
+rollout_batch_size: 1
+train_batch_per_replica: 8
+mini_batch: 1
+max_inference_batch_size: 1
+
+max_num_steps: 916
+num_epochs: 3
+learning_rate: 1.0e-6
+warmup_steps: 20
+ratio_clip: 0.1
+allowed_outdated_steps: 1
+save_freq: 30
+grad_norm_clip: 1.0
