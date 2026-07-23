@@ -674,7 +674,12 @@ class AutoVLAInferenceModel:
             qwen_inputs_rehydrated: dict[str, Any] = {}
             for k, v in raw_qi.items():
                 if isinstance(v, list):
-                    qwen_inputs_rehydrated[k] = torch.as_tensor(v)
+                    if k in ("pixel_values", "pixel_values_videos"):
+                        qwen_inputs_rehydrated[k] = torch.as_tensor(v, dtype=torch.float32)
+                    elif k in ("input_ids", "video_grid_thw", "image_grid_thw"):
+                        qwen_inputs_rehydrated[k] = torch.as_tensor(v, dtype=torch.int64)
+                    else:
+                        qwen_inputs_rehydrated[k] = torch.as_tensor(v)
                 elif isinstance(v, torch.Tensor):
                     qwen_inputs_rehydrated[k] = v
                 else:
