@@ -276,10 +276,6 @@ def _update_resolved_config(config: dict[str, Any], profile: A100LaunchProfile) 
         ]
     }
 
-    # Use the latest SFT checkpoint as GRPO starting point (better than original AutoVLA_PDMS_89)
-    model_cfg = _mapping(config, "model")
-    model_cfg["sft_model_path"] = "/tmp/model/AutoVLA/autovla_sft_step10000.ckpt"
-
 
     cosmos = _mapping(config, "cosmos")
     cosmos["mode"] = profile.mode
