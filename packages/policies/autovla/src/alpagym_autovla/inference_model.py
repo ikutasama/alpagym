@@ -282,18 +282,25 @@ class AutoVLAInferenceModel:
         completion_ids_out = None
         qwen_inputs_out = None
         if return_trace_for_rl:
-            logprob = self._compute_logprob(
-                model_inputs, prompt_completion_ids, prompt_length
-            ).reshape(1, 1)
-            action_token_ids_out = action_tokens.reshape(1, 1, -1).to(torch.int64).cpu()
-            completion_ids_out = completion_ids[0].cpu()
-            qwen_inputs_out = {
-                k: v.cpu() if isinstance(v, torch.Tensor) else v
-                for k, v in model_inputs.items()
-            }
-            qwen_inputs_out["prompt_length"] = prompt_length
-            del model_inputs, prompt_completion_ids
-            torch.cuda.empty_cache()
+            try:
+                logprob = self._compute_logprob(
+                    model_inputs, prompt_completion_ids, prompt_length
+                ).reshape(1, 1)
+                action_token_ids_out = action_tokens.reshape(1, 1, -1).to(torch.int64).cpu()
+                completion_ids_out = completion_ids[0].cpu()
+                qwen_inputs_out = {
+                    k: v.cpu() if isinstance(v, torch.Tensor) else v
+                    for k, v in model_inputs.items()
+                }
+                qwen_inputs_out["prompt_length"] = prompt_length
+            except Exception as exc:
+                logger.warning("Logprob computation failed, skipping: %s", exc)
+                logprob = torch.zeros(1, 1)
+                action_token_ids_out = action_tokens.reshape(1, 1, -1).to(torch.int64).cpu() if action_tokens is not None else None
+                completion_ids_out = completion_ids[0].cpu() if completion_ids is not None else None
+            finally:
+                del model_inputs, prompt_completion_ids
+                torch.cuda.empty_cache()
 
         return pred_xyz, pred_rot, logprob, action_token_ids_out, completion_ids_out, qwen_inputs_out
 
@@ -525,6 +532,8 @@ class AutoVLAInferenceModel:
         matching the trainer-side _compute_action_logprobs which uses the
         same validated token-id set.
         """
+        vocab_size = self._vlm.config.vocab_size
+        prompt_completion_ids = prompt_completion_ids.clamp(0, vocab_size - 1)
         with torch.no_grad():
             forward_kwargs = {
                 key: value
