@@ -296,11 +296,15 @@ class AutoVLAInferenceModel:
             except Exception as exc:
                 logger.warning("Logprob computation failed, skipping: %s", exc)
                 logprob = torch.zeros(1, 1)
-                action_token_ids_out = action_tokens.reshape(1, 1, -1).to(torch.int64).cpu() if action_tokens is not None else None
-                completion_ids_out = completion_ids[0].cpu() if completion_ids is not None else None
+                action_token_ids_out = None
+                completion_ids_out = None
+                qwen_inputs_out = None
             finally:
-                del model_inputs, prompt_completion_ids
-                torch.cuda.empty_cache()
+                try:
+                    del model_inputs, prompt_completion_ids
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
 
         return pred_xyz, pred_rot, logprob, action_token_ids_out, completion_ids_out, qwen_inputs_out
 
