@@ -336,6 +336,12 @@ def _update_resolved_config(config: dict[str, Any], profile: A100LaunchProfile) 
     inference = _mapping(_mapping(config, "policy"), "inference")
     inference["max_batch_size"] = geometry.max_inference_batch_size
 
+    # Fix step_dt_us to match AutoVLA's 0.5s trajectory interval (10 poses × 0.5s = 5s).
+    # The wizard default is 100000 (100ms) which compresses 5s trajectory into 1s,
+    # causing 5x speed and gRPC timeouts.
+    policy_model = _mapping(_mapping(config, "policy"), "model")
+    policy_model["step_dt_us"] = 500000
+
 
 def _update_cosmos_config(config: dict[str, Any], profile: A100LaunchProfile) -> None:
     """Update values parsed directly by Cosmos-RL workers."""
