@@ -50,6 +50,14 @@ class Qwen2_5_VLWeightMapper(HFModelWeightMapper):
         name = util.clear_weight_name(name)
         if name.startswith("visual."):
             return name
+        # Policy FSDP model uses model.embed_tokens / model.layers / model.norm
+        # (without language_model prefix). Map to the same HF key-space as rollout.
+        if name.startswith("model.embed_tokens"):
+            name = "model.language_model." + name[len("model."):]
+        elif name.startswith("model.layers."):
+            name = "model.language_model." + name[len("model."):]
+        elif name.startswith("model.norm"):
+            name = "model.language_model." + name[len("model."):]
         return super().policy_map_local_key_to_hf_key(name)
 
     # -- Rollout side -------------------------------------------------------
@@ -82,7 +90,7 @@ class Qwen2_5_VLWeightMapper(HFModelWeightMapper):
         trimmed: list[tuple[str, torch.Tensor]] = []
         for nm, t in group:
             if (
-                nm in ("model.embed_tokens.weight", "lm_head.weight")
+                nm in _VOCAB_PAD_KEYS
                 and isinstance(t, torch.Tensor)
                 and t.ndim == 2
                 and t.shape[0] > vocab_size
