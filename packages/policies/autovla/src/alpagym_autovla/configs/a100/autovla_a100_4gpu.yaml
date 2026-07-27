@@ -5,6 +5,7 @@ name: autovla_a100_4gpu_grpo
 cuda_visible_devices: "0,1,2,3"
 mode: disaggregated
 transport: nccl
+dp_shard_size: 1
 
 policy_replicas: 3
 rollout_replicas: 1

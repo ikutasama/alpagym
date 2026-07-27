@@ -5,6 +5,7 @@ name: autovla_a100_1gpu_grpo
 cuda_visible_devices: "6"
 mode: colocated
 transport: disk
+dp_shard_size: 1
 
 policy_replicas: 1
 rollout_replicas: 1
