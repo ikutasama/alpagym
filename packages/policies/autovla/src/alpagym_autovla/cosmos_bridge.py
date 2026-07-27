@@ -50,20 +50,19 @@ class Qwen2_5_VLWeightMapper(HFModelWeightMapper):
         name = util.clear_weight_name(name)
         if name.startswith("visual."):
             return name
-        # Policy FSDP model uses model.embed_tokens / model.layers / model.norm
-        # (without language_model prefix). Map to the same HF key-space as rollout.
-        if name.startswith("model.embed_tokens"):
-            name = "model.language_model." + name[len("model."):]
-        elif name.startswith("model.layers."):
-            name = "model.language_model." + name[len("model."):]
-        elif name.startswith("model.norm"):
-            name = "model.language_model." + name[len("model."):]
         return super().policy_map_local_key_to_hf_key(name)
 
     # -- Rollout side -------------------------------------------------------
 
     def rollout_map_local_key_to_hf_key(self, rollout_weight_name: str) -> str:
-        """Map rollout-side parameter names to HF checkpoint key-space."""
+        """Map rollout-side parameter names to HF checkpoint key-space.
+
+        The policy FSDP model uses ``model.embed_tokens``, ``model.layers.*``,
+        ``model.norm.*`` (without ``language_model`` prefix) while the rollout
+        HF model uses ``model.language_model.embed_tokens``,
+        ``model.language_model.layers.*``.  We normalise the rollout keys to
+        match the policy-side naming so Cosmos can generate sync instructions.
+        """
         name = rollout_weight_name
         if name.startswith("model.vlm."):
             name = name.replace("model.vlm.", "", 1)
@@ -73,6 +72,10 @@ class Qwen2_5_VLWeightMapper(HFModelWeightMapper):
             name = name.replace("llm.model.", "model.", 1)
         elif name.startswith("llm.lm_head."):
             name = name.replace("llm.lm_head.", "lm_head.", 1)
+        # Rollout uses model.language_model.{embed_tokens,layers,norm}
+        # Policy uses model.{embed_tokens,layers,norm} — strip language_model
+        if name.startswith("model.language_model."):
+            name = "model." + name[len("model.language_model."):]
         if name.startswith("visual."):
             return name
         return self.policy_map_local_key_to_hf_key(name)
