@@ -130,9 +130,9 @@ class BatchedModelOutput(_ModelOutputFields):
         for i in range(batch_size):
             model_outputs.append(
                 ModelOutput(
-                    pred_xyz=self.pred_xyz[i],
-                    pred_rot=self.pred_rot[i],
-                    logprob=self.logprob[i] if self.logprob is not None else None,
+                    pred_xyz=self.pred_xyz[i].clone(),
+                    pred_rot=self.pred_rot[i].clone(),
+                    logprob=self.logprob[i].clone() if self.logprob is not None else None,
                     extra=_split_extra_per_model_output(self.extra, i, batch_size),
                 )
             )

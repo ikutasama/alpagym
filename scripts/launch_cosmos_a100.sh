@@ -17,6 +17,9 @@ case "$PROFILE_SELECTOR" in
   1gpu)
     PROFILE_PATH="$ALPAGYM_DIR/packages/policies/autovla/src/alpagym_autovla/configs/a100/autovla_a100_1gpu.yaml"
     ;;
+  2gpu)
+    PROFILE_PATH="$ALPAGYM_DIR/packages/policies/autovla/src/alpagym_autovla/configs/a100/autovla_a100_2gpu.yaml"
+    ;;
   4gpu)
     PROFILE_PATH="$ALPAGYM_DIR/packages/policies/autovla/src/alpagym_autovla/configs/a100/autovla_a100_4gpu.yaml"
     ;;
@@ -55,6 +58,7 @@ sed -i \
   -e 's|/mnt/mnt_m181/z59900495/workspace/model|/tmp/model|g' \
   -e 's|/mnt/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Qwen/Qwen2.5-VL-3B-Instruct|/tmp/model/Qwen/Qwen2.5-VL-3B-Instruct|g' \
   -e 's|/mnt/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Zewei-Zhou/AutoVLA/AutoVLA_PDMS_89.ckpt|/tmp/model/AutoVLA/AutoVLA_PDMS_89.ckpt|g' \
+  -e 's|/data/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Zewei-Zhou/AutoVLA/autovla_sft_step[0-9]*\.ckpt|/tmp/model/AutoVLA/autovla_sft_step30000.ckpt|g' \
   "$LATEST_DIR/resolved_config.yaml"
 
 sed -i \
@@ -99,7 +103,7 @@ unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY grpc_proxy GRPC_PROXY all_pr
 export GRPC_ARG_ENABLE_HTTP_PROXY=0 no_proxy='localhost,127.0.0.1,0.0.0.0' NO_PROXY='localhost,127.0.0.1,0.0.0.0'
 export TMPDIR="$TMPDIR" GLOO_TIMEOUT_SECONDS="${GLOO_TIMEOUT_SECONDS:-3600}"
 export ALPAGYM_DRIVER_HOST=localhost ALPAGYM_DRIVER_PORT="$DRIVER_PORT"
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,garbage_collection_threshold:0.6}"
 if [ "$TRANSPORT_KIND" = "nccl" ]; then
   export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-0}"
   export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"

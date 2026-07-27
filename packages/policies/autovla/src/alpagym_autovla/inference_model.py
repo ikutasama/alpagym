@@ -612,20 +612,24 @@ class AutoVLAInferenceModel:
             action_selection.set_ix, action_selection.sample_ix
         ]
         payload: dict[str, Any] = {
-            "model_input": asdict(model_input),
-            "action_token_ids": torch.as_tensor(selected_action_token_ids, dtype=torch.int64),
+            "model_input": {k: v.cpu() if isinstance(v, torch.Tensor) else v
+                            for k, v in asdict(model_input).items()},
+            "action_token_ids": torch.as_tensor(selected_action_token_ids, dtype=torch.int64).cpu(),
         }
         if "completion_ids" in model_output.extra:
             comp = model_output.extra["completion_ids"]
             if comp.dim() > 1:
                 comp = comp[0]
-            payload["completion_ids"] = torch.as_tensor(comp, dtype=torch.int64)
+            payload["completion_ids"] = torch.as_tensor(comp, dtype=torch.int64).cpu()
         if "qwen_inputs" in model_output.extra:
             qwen_inputs_val = model_output.extra["qwen_inputs"]
             if isinstance(qwen_inputs_val, dict):
-                payload["qwen_inputs"] = qwen_inputs_val
+                payload["qwen_inputs"] = {k: v.cpu() if isinstance(v, torch.Tensor) else v
+                                          for k, v in qwen_inputs_val.items()}
             elif isinstance(qwen_inputs_val, list) and len(qwen_inputs_val) > 0:
-                payload["qwen_inputs"] = qwen_inputs_val[0]
+                qi = qwen_inputs_val[0]
+                payload["qwen_inputs"] = {k: v.cpu() if isinstance(v, torch.Tensor) else v
+                                          for k, v in qi.items()}
         return PolicyReplayData(
             replay_schema_version=1,
             payload_schema="autovla.action_tokens.v1",

@@ -233,6 +233,9 @@ class EgodriverGrpcServicer:
             session = self._sessions.pop(session_uuid)
         self._session_records[session_uuid] = session.get_record()
         session.policy.close()
+        del session
+        import torch
+        torch.cuda.empty_cache()
         logger.info(
             "Closed AlpaGym driver session=%s recorded_steps=%d",
             session_uuid,

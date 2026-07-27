@@ -80,6 +80,7 @@ class AlpamayoPolicy:
 
     def close(self) -> None:
         """Release per-session resources."""
+        self._buffers.clear()
 
     def _preprocess(
         self,
@@ -354,7 +355,7 @@ class AlpamayoPolicy:
             chosen_logprob = per_traj_logprob[
                 action_selection.set_ix,
                 action_selection.sample_ix,
-            ].view(1)
+            ].view(1).cpu()
             replay_data = self._inference_engine.build_policy_replay_data(
                 model_input=model_input,
                 model_output=model_output,
@@ -365,13 +366,15 @@ class AlpamayoPolicy:
         all_pred_xyz: torch.Tensor | None = None
         all_pred_quat: torch.Tensor | None = None
         if per_traj_logprob is not None:
-            all_pred_xyz = model_output.pred_xyz
-            all_pred_quat = pred_rot_to_quat(model_output.pred_rot)
+            all_pred_xyz = model_output.pred_xyz.cpu()
+            all_pred_quat = pred_rot_to_quat(model_output.pred_rot).cpu()
+
+        del model_output
 
         return PolicyOutput(
-            chosen_xyz=output_xyz,
-            chosen_quat=output_quat,
-            chosen_dt_us=output_dt_us,
+            chosen_xyz=output_xyz.cpu(),
+            chosen_quat=output_quat.cpu(),
+            chosen_dt_us=output_dt_us.cpu(),
             chosen_logprob=chosen_logprob,
             replay_data=replay_data,
             all_pred_xyz=all_pred_xyz,
