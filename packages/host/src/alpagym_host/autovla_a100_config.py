@@ -20,6 +20,7 @@ _PROFILE_KEYS = {
     "cuda_visible_devices",
     "mode",
     "transport",
+    "dp_shard_size",
     "policy_replicas",
     "rollout_replicas",
     "n_generation",
@@ -124,6 +125,7 @@ class A100LaunchProfile:
     cuda_visible_devices: str
     mode: str
     transport: str
+    dp_shard_size: int
     geometry: A100TrainGeometry
 
     @property
@@ -164,15 +166,19 @@ class A100LaunchProfile:
                 self.geometry.policy_replicas + self.geometry.rollout_replicas
             )
         else:
+            # Colocated: policy+rollout share one FSDP model.  When
+            # dp_shard_size=1 the model lives on a single GPU; when >1
+            # FSDP shards it across that many GPUs, so the GPU count
+            # must equal dp_shard_size.
             if (
                 self.geometry.policy_replicas != 1
                 or self.geometry.rollout_replicas != 1
             ):
                 raise ValueError(
                     "The supported colocated profile requires one policy and one "
-                    "rollout replica sharing one GPU"
+                    "rollout replica sharing the model"
                 )
-            expected_gpu_count = 1
+            expected_gpu_count = self.dp_shard_size
         if len(self.gpu_ids) != expected_gpu_count:
             raise ValueError(
                 f"mode={self.mode} with policy={self.geometry.policy_replicas} and "
@@ -202,6 +208,7 @@ def load_a100_profile(path: Path) -> A100LaunchProfile:
         cuda_visible_devices=_require_str(raw, "cuda_visible_devices"),
         mode=_require_str(raw, "mode"),
         transport=_require_str(raw, "transport"),
+        dp_shard_size=_require_int(raw, "dp_shard_size"),
         geometry=A100TrainGeometry(
             policy_replicas=_require_int(raw, "policy_replicas"),
             rollout_replicas=_require_int(raw, "rollout_replicas"),
@@ -285,7 +292,7 @@ def _update_resolved_config(config: dict[str, Any], profile: A100LaunchProfile) 
     launch["rollout_replicas"] = geometry.rollout_replicas
 
     policy_parallelism = _mapping(_mapping(cosmos, "policy"), "parallelism")
-    policy_parallelism["dp_shard_size"] = 1
+    policy_parallelism["dp_shard_size"] = profile.dp_shard_size
 
     train = _mapping(cosmos, "train")
     train.update(
@@ -385,7 +392,9 @@ def _update_cosmos_config(config: dict[str, Any], profile: A100LaunchProfile) ->
     )
 
     policy_parallelism = _mapping(_mapping(config, "policy"), "parallelism")
-    policy_parallelism["dp_shard_size"] = 1
+    policy_parallelism["dp_shard_size"] = profile.dp_shard_size
+    rollout_parallelism = _mapping(_mapping(config, "rollout"), "parallelism")
+    rollout_parallelism["dp_shard_size"] = profile.dp_shard_size
     rollout = _mapping(config, "rollout")
     rollout.update(
         {

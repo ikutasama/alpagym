@@ -104,13 +104,16 @@ export GRPC_ARG_ENABLE_HTTP_PROXY=0 no_proxy='localhost,127.0.0.1,0.0.0.0' NO_PR
 export TMPDIR="$TMPDIR" GLOO_TIMEOUT_SECONDS="${GLOO_TIMEOUT_SECONDS:-3600}"
 export ALPAGYM_DRIVER_HOST=localhost ALPAGYM_DRIVER_PORT="$DRIVER_PORT"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,garbage_collection_threshold:0.6}"
-if [ "$TRANSPORT_KIND" = "nccl" ]; then
+# NCCL is always needed in disaggregated mode for P2R weight sync,
+# regardless of whether data transport uses disk or NCCL.
+# A100 Docker has broken P2P, so disable it by default for disaggregated.
+if [ "$COSMOS_MODE" = "disaggregated" ] || [ "$TRANSPORT_KIND" = "nccl" ]; then
   export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-0}"
   export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
   export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
   export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-^lo,^docker}"
   export NCCL_TIMEOUT="${NCCL_TIMEOUT:-1800}"
-  export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-0}"
+  export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
   export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
 else
   unset NCCL_SHM_DISABLE NCCL_DEBUG NCCL_IB_DISABLE NCCL_SOCKET_IFNAME
