@@ -68,6 +68,10 @@ class Qwen2_5_VLWeightMapper(HFModelWeightMapper):
             name = name.replace("model.vlm.", "", 1)
         elif name.startswith("vlm."):
             name = name[len("vlm."):]
+        # Strip "model." prefix from visual params so they match the
+        # policy-side local names (visual.* without model. prefix).
+        if name.startswith("model.visual."):
+            name = name[len("model."):]
         if name.startswith("llm.model."):
             name = name.replace("llm.model.", "model.", 1)
         elif name.startswith("llm.lm_head."):
