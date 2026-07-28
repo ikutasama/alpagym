@@ -33,7 +33,7 @@ if [ ! -f "$PROFILE_PATH" ]; then
 fi
 
 cd "$ALPAGYM_DIR"
-PROFILE_FIELDS=$(UV_NO_MANAGED_PYTHON=1 UV_PYTHON="$(command -v python)" \
+PROFILE_FIELDS=$(\
   uv run --no-sync --all-packages python -m alpagym_host.autovla_a100_config \
   --profile "$PROFILE_PATH" --print-launch-fields)
 IFS=$'\t' read -r PROFILE_CUDA POLICY_REPLICAS ROLLOUT_REPLICAS COSMOS_MODE TRANSPORT_KIND PROFILE_NAME <<< "$PROFILE_FIELDS"
@@ -78,7 +78,7 @@ fi
 if [ -n "${SAVE_FREQ:-}" ]; then
   CONFIG_ARGS+=(--save-freq "$SAVE_FREQ")
 fi
-UV_NO_MANAGED_PYTHON=1 UV_PYTHON="$(command -v python)" \
+\
 uv run --no-sync --all-packages python -m alpagym_host.autovla_a100_config \
   "${CONFIG_ARGS[@]}"
 
@@ -140,7 +140,7 @@ PY
 cd "$ALPAGYM_DIR"
 AUTOVLA_REPO_PATH=/data/mnt_m62/10_personal/z59900495/workspace/AutoVLA \
 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1 \
-UV_NO_MANAGED_PYTHON=1 UV_PYTHON="$(command -v python)" \
+\
 uv run --no-sync --all-packages python -m cosmos_rl.launcher.launch_all \
   --config "$LATEST_DIR/cosmos_config.toml" \
   --policy "$POLICY_REPLICAS" --rollout "$ROLLOUT_REPLICAS" \
