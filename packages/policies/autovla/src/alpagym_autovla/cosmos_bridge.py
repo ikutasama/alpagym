@@ -37,20 +37,29 @@ class Qwen2_5_VLWeightMapper(HFModelWeightMapper):
     """
 
     def __init__(self, hf_config: AutoConfig):
-        try:
-            llm_config = hf_config.get_llm_config()
-        except (AttributeError, TypeError):
-            llm_config = hf_config
-        super().__init__(llm_config)
+        super().__init__(hf_config)
 
     # -- Policy side --------------------------------------------------------
 
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
-        """Map policy-side parameter names to HF checkpoint key-space."""
+        """Map policy-side parameter names to HF checkpoint key-space.
+
+        We skip the ``reverse_hf_conversion_mapping`` that the base
+        ``HFModelWeightMapper`` applies for VLM models.  That mapping
+        produces regex-pattern keys (e.g. ``model(?!\\.(language_model|visual)).``)
+        which cannot be matched by the rollout side's plain-string keys.
+        Instead we return plain names so both sides agree.
+        """
         name = util.clear_weight_name(name)
         if name.startswith("visual."):
             return name
-        return super().policy_map_local_key_to_hf_key(name)
+        if name == "model.lm_head.weight":
+            return "lm_head.weight"
+        if name.startswith("language_model."):
+            name = name[len("language_model."):]
+        if not name.startswith("model.") and name != "lm_head.weight":
+            name = "model." + name
+        return name
 
     # -- Rollout side -------------------------------------------------------
 

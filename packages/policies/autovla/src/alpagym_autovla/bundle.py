@@ -34,7 +34,7 @@ def install_autovla_runtime_bridge() -> None:
     action_token_ids) by rebuilding Qwen2.5-VL processor inputs and
     computing per-token log_probs — the same pattern Alpamayo R1 uses.
     """
-    from cosmos_rl.policy.model.base import ModelRegistry
+    from cosmos_rl.policy.model.base import ModelRegistry, WeightMapper
     from alpagym_autovla.cosmos_bridge import Qwen2_5_VLBaseModel, Qwen2_5_VLWeightMapper
 
     try:
@@ -43,10 +43,10 @@ def install_autovla_runtime_bridge() -> None:
             Qwen2_5_VLWeightMapper,
         )
     except ValueError:
-        logger.debug(
-            "qwen2_5_vl already registered by Cosmos-RL auto-discovery; "
-            "using built-in model."
-        )
+        for mt in Qwen2_5_VLBaseModel.supported_model_types():
+            WeightMapper.register_class(
+                mt, Qwen2_5_VLWeightMapper, allow_override=True
+            )
 
     from alpagym_autovla.autovla_trainer_forward import patch_trainer_forward
     patch_trainer_forward()
