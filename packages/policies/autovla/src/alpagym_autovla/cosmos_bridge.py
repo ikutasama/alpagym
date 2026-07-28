@@ -53,9 +53,14 @@ class Qwen2_5_VLWeightMapper(HFModelWeightMapper):
         name = util.clear_weight_name(name)
         if name.startswith("visual."):
             return name
+        if name.startswith("model.visual."):
+            name = name[len("model."):]
+            return name
         if name == "model.lm_head.weight":
             return "lm_head.weight"
-        if name.startswith("language_model."):
+        if name.startswith("model.language_model."):
+            name = "model." + name[len("model.language_model."):]
+        elif name.startswith("language_model."):
             name = name[len("language_model."):]
         if not name.startswith("model.") and name != "lm_head.weight":
             name = "model." + name
@@ -89,9 +94,12 @@ class Qwen2_5_VLWeightMapper(HFModelWeightMapper):
         # Policy uses model.{embed_tokens,layers,norm} — strip language_model
         if name.startswith("model.language_model."):
             name = "model." + name[len("model.language_model."):]
+            logger.info("rollout_map: stripped language_model -> %s", name)
         if name.startswith("visual."):
             return name
-        return self.policy_map_local_key_to_hf_key(name)
+        result = self.policy_map_local_key_to_hf_key(name)
+        logger.debug("rollout_map: %s -> %s", rollout_weight_name, result)
+        return result
 
     def rollout_split_local_key_n_param_to_hf_key_n_param(
         self, param_name: str, param: torch.Tensor
