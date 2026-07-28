@@ -498,6 +498,7 @@ def main(argv: list[str] | None = None) -> None:
                     profile.mode,
                     profile.transport,
                     profile.name,
+                    str(profile.dp_shard_size),
                 )
             )
         )
