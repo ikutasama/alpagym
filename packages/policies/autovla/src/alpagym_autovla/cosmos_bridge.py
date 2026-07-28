@@ -97,6 +97,13 @@ class Qwen2_5_VLWeightMapper(HFModelWeightMapper):
         self, param_name: str, param: torch.Tensor
     ) -> list[tuple[str, torch.Tensor]]:
         """Rollout-side mapping/splitting with vocab-padding trimming."""
+        compatible_key = self.rollout_map_local_key_to_hf_key(param_name)
+        # Visual encoder qkv weights must NOT be split into q/k/v — the
+        # policy side's policy_decompose_param_1_to_n_for_sync only handles
+        # LLM qkv_proj (with underscore), not visual attn.qkv.  Splitting
+        # here causes key mismatch → controller shard_recv_insts 500.
+        if compatible_key.startswith("visual.") and "attn.qkv" in compatible_key:
+            return [(compatible_key, param)]
         group = super().rollout_split_local_key_n_param_to_hf_key_n_param(
             param_name, param
         )
