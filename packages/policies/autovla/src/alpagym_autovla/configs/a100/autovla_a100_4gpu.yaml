@@ -1,21 +1,23 @@
-# Three policy workers use GPUs 0-2 and one rollout worker uses GPU 3. The
-# rollout worker is the only Egodriver server on port 5012; replay from rollout
-# to policy stays local to the A100 host over NCCL.
+# Colocated mode with FSDP(dp_shard_size=4): policy and rollout share
+# one FSDP-sharded model across 4 GPUs.  No P2R weight sync needed
+# (set_underlying_model shares the object), so no tied-parameter issues.
+# Each GPU holds ~1/4 of the 3.76B model = ~12GB training + ~8GB
+# inference activations = ~20GB / 80GB, leaving ~60GB headroom.
 name: autovla_a100_4gpu_grpo
-cuda_visible_devices: "0,1,2,3"
-mode: disaggregated
-transport: nccl
-dp_shard_size: 1
+cuda_visible_devices: "5,6,7,8"
+mode: colocated
+transport: disk
+dp_shard_size: 4
 
-policy_replicas: 3
+policy_replicas: 1
 rollout_replicas: 1
 
-# Three prompt groups x eight candidates match three policy batches of eight.
+# One prompt group with eight candidates gives one complete GRPO group/update.
 n_generation: 8
-rollout_batch_size: 3
+rollout_batch_size: 1
 train_batch_per_replica: 8
 mini_batch: 2
-max_inference_batch_size: 3
+max_inference_batch_size: 1
 
 max_num_steps: 916
 num_epochs: 3
