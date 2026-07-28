@@ -394,7 +394,10 @@ def _update_cosmos_config(config: dict[str, Any], profile: A100LaunchProfile) ->
     policy_parallelism = _mapping(_mapping(config, "policy"), "parallelism")
     policy_parallelism["dp_shard_size"] = profile.dp_shard_size
     rollout_parallelism = _mapping(_mapping(config, "rollout"), "parallelism")
-    rollout_parallelism["dp_shard_size"] = profile.dp_shard_size
+    # Rollout uses dp_shard_size=1 (no FSDP) for fast inference.
+    # FSDP all-gather on every forward token makes generate() ~100x
+    # slower, causing gRPC DEADLINE_EXCEEDED in colocated mode.
+    rollout_parallelism["dp_shard_size"] = 1
     rollout = _mapping(config, "rollout")
     rollout.update(
         {
