@@ -513,6 +513,8 @@ def patch_cosmos_qwen_model_for_autovla(sft_checkpoint_path: str | None) -> None
        ``local_view.data.copy_()`` pattern.
     """
     from cosmos_rl.policy.model.hf_models import HFModel
+    from cosmos_rl.policy.model.base import WeightMapper
+    from cosmos_rl.utils.constant import COSMOS_HF_MODEL_TYPES
 
     if getattr(HFModel, "_autovla_patched", False):
         if sft_checkpoint_path is not None:
@@ -520,6 +522,21 @@ def patch_cosmos_qwen_model_for_autovla(sft_checkpoint_path: str | None) -> None
         return
 
     HFModel._autovla_sft_checkpoint_path = sft_checkpoint_path
+
+    # --- Patch 0: Override weight mapper for both model-type keys -----------
+    # Policy falls back to HFModel (model_type="hfmodel") → uses
+    # HFModelWeightMapper by default, which does NOT handle visual.* params
+    # or the language_model prefix.  Rollout uses the built-in
+    # Qwen2_5_VLConditionalModel (model_type="qwen2_5_vl") → uses the
+    # built-in QwenVL25WeightMapper.  Mismatched mappers produce different
+    # HF key-spaces → controller crashes with 500 on shard_recv_insts.
+    # Force-register our Qwen2_5_VLWeightMapper for both keys so both sides
+    # use the same mapping with visual.* and language_model prefix handling.
+    WeightMapper.register_class(
+        ["qwen2_5_vl", COSMOS_HF_MODEL_TYPES],
+        Qwen2_5_VLWeightMapper,
+        allow_override=True,
+    )
 
     # --- Patch 1: AutoConfig.from_pretrained vocab resize ------------------
     _original_autoconfig_from_pretrained = AutoConfig.from_pretrained
