@@ -349,6 +349,21 @@ def _update_resolved_config(config: dict[str, Any], profile: A100LaunchProfile) 
     policy_model = _mapping(_mapping(config, "policy"), "model")
     policy_model["step_dt_us"] = 500000
 
+    # In colocated mode with FSDP, keep model unsharded after forward so
+    # that model.generate() during rollout doesn't trigger all-gather on
+    # every token. With 'default', FSDP reshards after each forward pass,
+    # making 500-token generation take ~10 minutes (gRPC 600s timeout).
+    # 'never' keeps full params in memory (~12GB/GPU for 3.76B model on 4×80GB).
+    train_config = _mapping(config, "train")
+    train_config["fsdp_reshard_after_forward"] = "never"
+
+    # Increase simulation timeout from 600s to 1800s as safety margin
+    # for rollout generation in multi-GPU mode.
+    resolved_config = _mapping(config, "resolved_config") if "resolved_config" in config else None
+    if resolved_config is not None:
+        resolved_config["alpasim"] = resolved_config.get("alpasim", {})
+        resolved_config["alpasim"]["simulation_timeout_s"] = 1800.0
+
 
 def _update_cosmos_config(config: dict[str, Any], profile: A100LaunchProfile) -> None:
     """Update values parsed directly by Cosmos-RL workers."""
@@ -394,10 +409,7 @@ def _update_cosmos_config(config: dict[str, Any], profile: A100LaunchProfile) ->
     policy_parallelism = _mapping(_mapping(config, "policy"), "parallelism")
     policy_parallelism["dp_shard_size"] = profile.dp_shard_size
     rollout_parallelism = _mapping(_mapping(config, "rollout"), "parallelism")
-    # Rollout uses dp_shard_size=1 (no FSDP) for fast inference.
-    # FSDP all-gather on every forward token makes generate() ~100x
-    # slower, causing gRPC DEADLINE_EXCEEDED in colocated mode.
-    rollout_parallelism["dp_shard_size"] = 1
+    rollout_parallelism["dp_shard_size"] = profile.dp_shard_size
     rollout = _mapping(config, "rollout")
     rollout.update(
         {
