@@ -1,18 +1,17 @@
-# Colocated mode with FSDP(dp_shard_size=4): policy and rollout share
-# one FSDP-sharded model across 4 GPUs.  No P2R weight sync needed
-# (set_underlying_model shares the object), so no tied-parameter issues.
-# Each GPU holds ~1/4 of the 3.76B model = ~12GB training + ~8GB
-# inference activations = ~20GB / 80GB, leaving ~60GB headroom.
+# Disaggregated mode with dp_shard_size=1: policy on one GPU, rollout on another.
+# No FSDP — each GPU holds a full model copy. Weight sync via shard-based P2R.
+# Matches upstream alpagym's 2-GPU design (alpamayo_1_5_local_2gpu_smoke).
+# Uses 4 GPUs: policy_replicas=1 + rollout_replicas=1 = 2 GPUs for cosmos,
+# remaining 2 GPUs available for AlPaSim or other tasks.
 name: autovla_a100_4gpu_grpo
 cuda_visible_devices: "4,5,6,7"
-mode: colocated
+mode: disaggregated
 transport: disk
-dp_shard_size: 4
+dp_shard_size: 1
 
 policy_replicas: 1
 rollout_replicas: 1
 
-# One prompt group with eight candidates gives one complete GRPO group/update.
 n_generation: 8
 rollout_batch_size: 1
 train_batch_per_replica: 8
