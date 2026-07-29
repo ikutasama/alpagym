@@ -554,7 +554,10 @@ class AutoVLAInferenceModel:
         logits = logits[:, :-1, :]  # (1, L-1, V)
         target_ids = prompt_completion_ids[:, 1:]  # (1, L-1)
 
-        log_probs = torch.log_softmax(logits, dim=-1)  # (1, L-1, V)
+        # Cast logits to fp32 before log_softmax for numerical precision.
+        # bf16 log_softmax loses ~3 decimal digits, making per-token logprobs
+        # appear as integers and causing imprecise ratio computation in GRPO.
+        log_probs = torch.log_softmax(logits.float(), dim=-1)  # (1, L-1, V)
         per_token_logps = log_probs.gather(2, target_ids.unsqueeze(-1)).squeeze(-1)  # (1, L-1)
 
         completion_ids = target_ids[:, prompt_length - 1:]  # (1, completion_len)

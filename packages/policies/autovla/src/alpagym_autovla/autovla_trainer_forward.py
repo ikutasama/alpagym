@@ -266,7 +266,7 @@ def _compute_action_logprobs(
     logits = logits[:, :-1, :]  # [1, L-1, V]
     target_ids = prompt_completion_ids[:, 1:]  # [1, L-1]
 
-    log_probs = torch.log_softmax(logits, dim=-1)  # [1, L-1, V]
+    log_probs = torch.log_softmax(logits.float(), dim=-1)  # [1, L-1, V]
     per_token_logps = log_probs.gather(2, target_ids.unsqueeze(-1)).squeeze(-1)  # [1, L-1]
 
     completion_part_ids = target_ids[:, prompt_length - 1:]
@@ -327,7 +327,7 @@ def _compute_action_logprobs_from_qwen_inputs(
     logits = logits[:, :-1, :]  # [1, L-1, V]
     target_ids = prompt_completion_ids[:, 1:]  # [1, L-1]
 
-    log_probs = torch.log_softmax(logits, dim=-1)  # [1, L-1, V]
+    log_probs = torch.log_softmax(logits.float(), dim=-1)  # [1, L-1, V]
     per_token_logps = log_probs.gather(2, target_ids.unsqueeze(-1)).squeeze(-1)  # [1, L-1]
 
     completion_part_ids = target_ids[:, prompt_length - 1:]
@@ -351,7 +351,7 @@ def _compute_action_logprobs_from_qwen_inputs(
                 **forward_kwargs,
             )
             ref_logits = ref_outputs.logits[:, :-1, :]
-            ref_log_probs = torch.log_softmax(ref_logits, dim=-1)
+            ref_log_probs = torch.log_softmax(ref_logits.float(), dim=-1)
             ref_per_token_logps = ref_log_probs.gather(2, target_ids.unsqueeze(-1)).squeeze(-1)
             ref_completion_logps = ref_per_token_logps[:, prompt_length - 1:]
 
