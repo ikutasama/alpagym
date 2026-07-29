@@ -1,22 +1,21 @@
-# Disaggregated mode with dp_shard_size=1: policy on one GPU, rollout on another.
-# No FSDP — each GPU holds a full model copy. Weight sync via shard-based P2R.
-# Matches upstream alpagym's 2-GPU design (alpamayo_1_5_local_2gpu_smoke).
-# Uses 4 GPUs: policy_replicas=1 + rollout_replicas=1 = 2 GPUs for cosmos,
-# remaining 2 GPUs available for AlPaSim or other tasks.
+# 4-GPU disaggregated: 3 policy replicas + 1 rollout replica.
+# No FSDP (dp_shard_size=1), each GPU holds full model (~6GB).
+# Matches upstream alpagym's multi-GPU design.
+# Geometry: n_gen(8) × rollout_batch(3) × rollout_replicas(1) = 24 = policy_replicas(3) × train_batch(8)
 name: autovla_a100_4gpu_grpo
-cuda_visible_devices: "5,7"
+cuda_visible_devices: "4,5,6,7"
 mode: disaggregated
 transport: disk
 dp_shard_size: 1
 
-policy_replicas: 1
+policy_replicas: 3
 rollout_replicas: 1
 
 n_generation: 8
-rollout_batch_size: 1
+rollout_batch_size: 3
 train_batch_per_replica: 8
 mini_batch: 2
-max_inference_batch_size: 1
+max_inference_batch_size: 3
 
 max_num_steps: 916
 num_epochs: 3
