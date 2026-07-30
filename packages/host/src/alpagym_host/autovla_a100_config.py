@@ -349,10 +349,18 @@ def _update_resolved_config(config: dict[str, Any], profile: A100LaunchProfile) 
     policy_model = _mapping(_mapping(config, "policy"), "model")
     policy_model["step_dt_us"] = 500000
 
-    # Increase simulation timeout from 600s to 1800s as safety margin
-    # for rollout generation in multi-GPU mode.
+    # Match official alpagym smoke config: 6s total simulation per rollout.
+    # control_timestep=200ms, force_gt=1.6s (8 warmup steps),
+    # expected_valid_steps=22 → n_sim_steps=30, total=30×0.2s=6s.
+    # With step_dt_us=500ms, 22 valid steps cover 11s — too slow.
+    # Reduce to 10 valid steps: 10×0.5s=5s driving, total=18×0.2s=3.6s.
     alpasim = _mapping(config, "alpasim")
     alpasim["simulation_timeout_s"] = 1800.0
+    wizard = _mapping(alpasim, "wizard_args")
+    wizard["control_timestep_us"] = 200000
+    wizard["force_gt_duration_us"] = 1600000
+    # n_sim_steps = expected_valid_steps + force_gt/control = 10 + 8 = 18
+    wizard["n_sim_steps"] = 18
 
 
 def _update_cosmos_config(config: dict[str, Any], profile: A100LaunchProfile) -> None:

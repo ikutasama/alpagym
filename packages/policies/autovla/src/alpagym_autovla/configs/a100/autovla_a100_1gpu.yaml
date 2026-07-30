@@ -10,13 +10,15 @@ dp_shard_size: 1
 policy_replicas: 1
 rollout_replicas: 1
 
-# One prompt group with eight candidates gives one complete GRPO group/update.
+# GRPO: 8 candidates per prompt, 8 samples per training batch.
 n_generation: 8
 rollout_batch_size: 1
 train_batch_per_replica: 8
 mini_batch: 1
 max_inference_batch_size: 1
 
+# Shorter rollout: 10 valid steps × 0.5s = 5s driving (vs 22×0.5=11s).
+# Halves rollout time, doubles training throughput.
 max_num_steps: 916
 num_epochs: 3
 learning_rate: 1.0e-6
