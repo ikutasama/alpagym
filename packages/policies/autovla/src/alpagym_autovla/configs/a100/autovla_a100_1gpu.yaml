@@ -11,9 +11,9 @@ policy_replicas: 1
 rollout_replicas: 1
 
 # GRPO: 8 candidates per prompt, 8 samples per training batch.
-n_generation: 8
+n_generation: 4
 rollout_batch_size: 1
-train_batch_per_replica: 8
+train_batch_per_replica: 4
 mini_batch: 1
 max_inference_batch_size: 1
 
