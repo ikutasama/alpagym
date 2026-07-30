@@ -2,7 +2,7 @@
 # current colocated Cosmos packer. The external AlpaSim runtime remains on 5011
 # and the single Egodriver reverse tunnel remains on 5012.
 name: autovla_a100_1gpu_grpo
-cuda_visible_devices: "6"
+cuda_visible_devices: "7"
 mode: colocated
 transport: disk
 dp_shard_size: 1
