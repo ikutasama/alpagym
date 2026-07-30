@@ -186,10 +186,15 @@ class AutoVLAInferenceModel:
         # num_poses=10 action tokens + short text + EOS ≈ 30 tokens.
         # 80 gives generous headroom; the original 500 caused 20-min
         # generation stalls when the model didn't emit EOS.
+        # Temperature 0.3: low enough to keep trajectories coherent,
+        # high enough for GRPO group diversity (8 samples per prompt).
+        # Original AutoVLA uses 0.01 (near-greedy), but that produces
+        # nearly identical rollouts, defeating GRPO's group-relative
+        # advantage computation.
         gen_kwargs = {
             "do_sample": True,
             "max_new_tokens": 80,
-            "temperature": 0.9,
+            "temperature": 0.3,
             "top_k": sampling.top_k if sampling.top_k else 0,
             "top_p": sampling.top_p if sampling.top_p else 1.0,
         }
