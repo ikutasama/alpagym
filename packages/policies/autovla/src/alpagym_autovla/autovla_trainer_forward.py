@@ -277,7 +277,10 @@ def _compute_action_logprobs(
     if action_mask.any():
         logprob = completion_logps[action_mask].sum()
     else:
-        logprob = completion_logps.new_zeros(())
+        # No action tokens in completion — use mean of all completion logps
+        # to keep the tensor in the autograd graph (avoids "does not require
+        # grad" crash on backward when rollouts produce 0 action tokens).
+        logprob = completion_logps.mean() * 0.0
 
     return logprob.squeeze() if logprob.dim() > 0 else logprob
 
@@ -338,7 +341,8 @@ def _compute_action_logprobs_from_qwen_inputs(
     if action_mask.any():
         logprob = completion_logps[action_mask].sum()
     else:
-        logprob = completion_logps.new_zeros(())
+        # No action tokens — keep grad_fn alive to avoid backward crash.
+        logprob = completion_logps.mean() * 0.0
 
     logprob_out = logprob.squeeze() if logprob.dim() > 0 else logprob
 
