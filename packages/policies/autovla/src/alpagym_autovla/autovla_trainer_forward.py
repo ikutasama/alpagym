@@ -108,24 +108,17 @@ def _build_qwen_inputs_for_training(
             frame = np.transpose(frame, (1, 2, 0))
         pil_images.append(Image.fromarray(frame))
 
-    # Velocity/acceleration x/y components from ego history (matches inference).
+    # Velocity/acceleration from ego history (same as inference)
     if ego_history_xyz.shape[0] >= 2:
-        diff = ego_history_xyz[1:] - ego_history_xyz[:-1]  # [T-1, 3]
-        vel_xy = diff[-1][:2]  # [vx, vy]
+        diff = ego_history_xyz[1:] - ego_history_xyz[:-1]
+        velocity = float(torch.norm(diff[-1][:2]).item())
         if diff.shape[0] >= 2:
-            acc_xy = (diff[-1] - diff[-2])[:2]  # [ax, ay]
+            acceleration = float(torch.norm(diff[-1][:2] - diff[-2][:2]).item())
         else:
-            acc_xy = torch.zeros(2)
+            acceleration = 0.0
     else:
-        vel_xy = torch.zeros(2)
-        acc_xy = torch.zeros(2)
-
-    velocity = [float(vel_xy[0]), float(vel_xy[1])]
-    acceleration = [float(acc_xy[0]), float(acc_xy[1])]
-
-    # Historical ego action label (matches inference).
-    from alpagym_autovla.inference_model import _get_ego_action_label
-    his_ego_action = _get_ego_action_label(ego_history_xyz[:, :2])
+        velocity = 0.0
+        acceleration = 0.0
 
     # Instruction from route (same as inference)
     if route_xy is not None and route_xy.shape[0] > 0:
@@ -173,11 +166,11 @@ def _build_qwen_inputs_for_training(
     content.append({
         "type": "text",
         "text": (
-            f"The ego vehicle behavior in the past 4s is {his_ego_action}."
-            f"The ego vehicle's current velocity is {velocity[0]:.3f} m/s at x-direction and {velocity[1]:.3f} m/s at y-direction."
-            f"The ego vehicle's current acceleration is {acceleration[0]:.3f} m/s^2 at x-direction and {acceleration[1]:.3f} m/s^2 at y-direction. "
-            f"The current driving command instruction of ego vehicle is: {instruction}, indicating the intended route direction."
-            f" Based on this information, plan the action trajectory for the autonomous vehicle over the next five seconds."
+            f"The current velocity of the vehicle is {velocity:.3f} m/s, "
+            f"and the current acceleration is {acceleration:.3f} m/s^2. "
+            f"The driving instruction is: {instruction}. "
+            f"Based on this information, plan the action trajectory for the "
+            f"autonomous vehicle over the next five seconds."
         ),
     })
 

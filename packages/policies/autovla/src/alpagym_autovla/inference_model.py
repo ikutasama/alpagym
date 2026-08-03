@@ -345,26 +345,17 @@ class AutoVLAInferenceModel:
             else:
                 pil_images.append(Image.fromarray(frame))
 
-        # Build velocity/acceleration x/y components from ego history.
-        # Matches original AutoVLA: velocity=[vx, vy], acceleration=[ax, ay].
+        # Build velocity/acceleration from ego history
         if ego_history.shape[0] >= 2:
-            diff = ego_history[1:] - ego_history[:-1]  # [T-1, 3]
-            vel_xy = diff[-1][:2]  # [vx, vy]
+            diff = ego_history[1:] - ego_history[:-1]
+            velocity = float(torch.norm(diff[-1][:2]).item())
             if diff.shape[0] >= 2:
-                acc_xy = (diff[-1] - diff[-2])[:2]  # [ax, ay]
+                acceleration = float(torch.norm(diff[-1][:2] - diff[-2][:2]).item())
             else:
-                acc_xy = torch.zeros(2)
+                acceleration = 0.0
         else:
-            vel_xy = torch.zeros(2)
-            acc_xy = torch.zeros(2)
-
-        velocity = [float(vel_xy[0]), float(vel_xy[1])]
-        acceleration = [float(acc_xy[0]), float(acc_xy[1])]
-
-        # Build historical ego action label from ego history trajectory.
-        # Matches original AutoVLA get_action_instruction(): returns
-        # "<behavior> with <speed>" e.g. "turn left with an acceleration".
-        his_ego_action = _get_ego_action_label(ego_history[:, :2])
+            velocity = 0.0
+            acceleration = 0.0
 
         # Build driving instruction from route
         if route_xy.shape[0] > 0:
@@ -377,9 +368,7 @@ class AutoVLAInferenceModel:
             instruction = "move forward"
 
         # Build chat messages
-        user_content = self._build_user_content(
-            pil_images, velocity, acceleration, his_ego_action, instruction
-        )
+        user_content = self._build_user_content(pil_images, velocity, acceleration, instruction)
 
         if self._use_cot:
             system_text = (
@@ -433,19 +422,17 @@ class AutoVLAInferenceModel:
         return {k: v.to(self._device) if isinstance(v, torch.Tensor) else v
                 for k, v in inputs.items()}
 
-
     def _build_user_content(
         self,
         pil_images: list,
-        velocity: list,  # [vx, vy]
-        acceleration: list,  # [ax, ay]
-        his_ego_action: str,
+        velocity: float,
+        acceleration: float,
         instruction: str,
     ) -> list:
         """Build user content list for the chat template.
 
-        Matches original AutoVLA prompt format with x/y velocity/acceleration
-        components and historical ego action label.
+        Groups images into video segments (3 cameras x 4 frames).
+        Falls back to single-camera if fewer images available.
         """
         num_images = len(pil_images)
         min_pixels = 28 * 28 * 128
@@ -467,9 +454,10 @@ class AutoVLAInferenceModel:
                     "type": "video",
                     "min_pixels": min_pixels,
                     "max_pixels": max_pixels,
-                    "video": cam_frames,
+                    "video": cam_frames,  # PIL images directly
                 })
         elif num_images >= 4:
+            # Single camera with multiple frames
             content.append({"type": "text", "text": f"Front view video, {num_images} frames at 2 Hz."})
             content.append({
                 "type": "video",
@@ -478,17 +466,18 @@ class AutoVLAInferenceModel:
                 "video": pil_images,
             })
         else:
+            # Single frames
             for i, img in enumerate(pil_images):
                 content.append({"type": "image", "image": img, "min_pixels": min_pixels, "max_pixels": max_pixels})
 
         content.append({
             "type": "text",
             "text": (
-                f"The ego vehicle behavior in the past 4s is {his_ego_action}."
-                f"The ego vehicle's current velocity is {velocity[0]:.3f} m/s at x-direction and {velocity[1]:.3f} m/s at y-direction."
-                f"The ego vehicle's current acceleration is {acceleration[0]:.3f} m/s^2 at x-direction and {acceleration[1]:.3f} m/s^2 at y-direction. "
-                f"The current driving command instruction of ego vehicle is: {instruction}, indicating the intended route direction."
-                f" Based on this information, plan the action trajectory for the autonomous vehicle over the next five seconds."
+                f"The current velocity of the vehicle is {velocity:.3f} m/s, "
+                f"and the current acceleration is {acceleration:.3f} m/s^2. "
+                f"The driving instruction is: {instruction}. "
+                f"Based on this information, plan the action trajectory for the "
+                f"autonomous vehicle over the next five seconds."
             ),
         })
 
@@ -725,61 +714,3 @@ class AutoVLAInferenceModel:
             raise ValueError("autovla replay requires old_logprob")
         old_logprob = torch.as_tensor(replay_data.old_logprob, dtype=torch.float32).reshape(())
         return model_inputs, old_logprob
-
-
-def _get_ego_action_label(
-    ego_positions: torch.Tensor,  # [T_hist, 2] (x, y)
-    interval_s: float = 0.5,
-) -> str:
-    """Match original AutoVLA get_action_instruction().
-
-    Returns "<behavior> with <speed>" e.g. "turn left with an acceleration".
-    """
-    import numpy as np
-
-    if ego_positions.shape[0] < 2:
-        return "move forward with a constant speed"
-
-    pos = ego_positions.cpu().numpy()  # [T, 2]
-    vel = np.diff(pos, axis=0) / interval_s  # [T-1, 2]
-    if len(vel) > 0:
-        vel = np.concatenate([vel, vel[-1:]], axis=0)  # pad to [T, 2]
-    else:
-        vel = np.zeros((1, 2))
-
-    velos = np.linalg.norm(vel, axis=1)
-    cur_velo = velos[0]
-    end_velo = velos[-1]
-
-    # speed meta
-    constant_eps = 0.8
-    stop_eps = 0.3
-    if cur_velo < stop_eps and end_velo < stop_eps:
-        speed_meta = "stop"
-    elif end_velo < stop_eps:
-        speed_meta = "a deceleration to zero"
-    elif abs(end_velo - cur_velo) < constant_eps:
-        speed_meta = "a constant speed"
-    elif end_velo > cur_velo:
-        speed_meta = "a quick acceleration" if end_velo > 2 * cur_velo else "an acceleration"
-    else:
-        speed_meta = "a quick deceleration" if cur_velo > 2 * end_velo else "a deceleration"
-
-    if speed_meta == "stop":
-        return "STOP"
-
-    # behavior meta
-    forward_th = 2.0
-    lane_changing_th = 4.0
-    final_lat = pos[-1, 1]
-
-    if np.all(np.abs(pos[:, 1]) < forward_th):
-        behavior_meta = "move forward"
-    elif final_lat > 0:
-        behavior_meta = "turn left" if abs(final_lat) > lane_changing_th else "change lane to left"
-    elif final_lat < 0:
-        behavior_meta = "turn right" if abs(final_lat) > lane_changing_th else "change lane to right"
-    else:
-        behavior_meta = "move forward"
-
-    return f"{behavior_meta} with {speed_meta}"
