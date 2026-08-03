@@ -413,8 +413,8 @@ def _update_cosmos_config(config: dict[str, Any], profile: A100LaunchProfile) ->
     # Gradient checkpointing re-runs forward in backward, producing regular
     # Tensors that conflict with FSDP's DTensor parameters (aten.mul crash).
     # 3.76B model on 80GB A100 fits without checkpointing.
-    policy_model = _mapping(_mapping(config, "policy"), "model")
-    policy_model["model_gradient_checkpointing"] = False
+    policy = _mapping(config, "policy")
+    policy["model_gradient_checkpointing"] = False
 
     # In colocated mode with FSDP, keep model unsharded after forward so
     # that model.generate() during rollout doesn't trigger all-gather on
