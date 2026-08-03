@@ -120,6 +120,14 @@ def _build_qwen_inputs_for_training(
         velocity = 0.0
         acceleration = 0.0
 
+    # History waypoints for prompt: last 4 positions (past 2s at 0.5s).
+    if ego_history_xyz.shape[0] >= 4:
+        history_xy = ego_history_xyz[-4:, :2].tolist()
+    elif ego_history_xyz.shape[0] >= 1:
+        history_xy = ego_history_xyz[:, :2].tolist()
+    else:
+        history_xy = [[0.0, 0.0]]
+
     # Instruction from route (same as inference)
     if route_xy is not None and route_xy.shape[0] > 0:
         first_wp = route_xy[0]
@@ -166,6 +174,8 @@ def _build_qwen_inputs_for_training(
     content.append({
         "type": "text",
         "text": (
+            f"The recent trajectory of the ego vehicle (x, y) in ego frame "
+            f"over the past 2 seconds at 0.5s intervals is: {history_xy}. "
             f"The current velocity of the vehicle is {velocity:.3f} m/s, "
             f"and the current acceleration is {acceleration:.3f} m/s^2. "
             f"The driving instruction is: {instruction}. "

@@ -357,6 +357,15 @@ class AutoVLAInferenceModel:
             velocity = 0.0
             acceleration = 0.0
 
+        # History waypoints for prompt: last 4 positions (past 2s at 0.5s).
+        # Gives model trajectory shape to reduce lateral jitter.
+        if ego_history.shape[0] >= 4:
+            history_xy = ego_history[-4:, :2].tolist()
+        elif ego_history.shape[0] >= 1:
+            history_xy = ego_history[:, :2].tolist()
+        else:
+            history_xy = [[0.0, 0.0]]
+
         # Build driving instruction from route
         if route_xy.shape[0] > 0:
             first_wp = route_xy[0]
@@ -368,7 +377,9 @@ class AutoVLAInferenceModel:
             instruction = "move forward"
 
         # Build chat messages
-        user_content = self._build_user_content(pil_images, velocity, acceleration, instruction)
+        user_content = self._build_user_content(
+            pil_images, velocity, acceleration, history_xy, instruction
+        )
 
         if self._use_cot:
             system_text = (
@@ -427,6 +438,7 @@ class AutoVLAInferenceModel:
         pil_images: list,
         velocity: float,
         acceleration: float,
+        history_xy: list,
         instruction: str,
     ) -> list:
         """Build user content list for the chat template.
@@ -473,6 +485,8 @@ class AutoVLAInferenceModel:
         content.append({
             "type": "text",
             "text": (
+                f"The recent trajectory of the ego vehicle (x, y) in ego frame "
+                f"over the past 2 seconds at 0.5s intervals is: {history_xy}. "
                 f"The current velocity of the vehicle is {velocity:.3f} m/s, "
                 f"and the current acceleration is {acceleration:.3f} m/s^2. "
                 f"The driving instruction is: {instruction}. "
