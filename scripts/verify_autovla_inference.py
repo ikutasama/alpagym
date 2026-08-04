@@ -235,22 +235,81 @@ def main():
     # Build sample
     sample = dataset._build_sample(clip_ids[0])
 
-    # If --no-history, rebuild text without history waypoints (old format).
+    # Rebuild messages for INFERENCE (system + user only, add_generation_prompt=True).
+    # The SFT sample text includes the GT assistant response — for inference
+    # we must NOT include it, otherwise the model sees the answer and outputs nothing.
+    from qwen_vl_utils import process_vision_info
+
+    # Reconstruct the messages from the sample's components
+    # Parse the original messages from the dataset's _build_sample
+    # Instead of using sample["text"] (which has GT), rebuild with generation prompt.
+    system_text = (
+        "You are an Advanced Driver Assistance and Full Self-Driving System. "
+        "You will be provided with video observations from the ego vehicle's "
+        "surrounding cameras, along with the vehicle's current dynamic states. "
+        "Your task is to predict the most appropriate driving action for the "
+        "next five seconds."
+    )
+
+    # Get camera frames and ego data from the sample
+    cameras = dataset._extract_camera_frames(clip_ids[0])
+    ego = dataset._extract_ego_motion(clip_ids[0])
+
+    sample_rate_hz = 1.0 / dataset.frame_interval_s
+    video_desc = (
+        f"comprising {dataset.num_context_frames} sequential frames sampled at "
+        f"{sample_rate_hz:g} Hz."
+    )
+    min_px = model_config["video"]["min_pixels"]
+    max_px = model_config["video"]["max_pixels"]
+
     if args.no_history:
-        # Replace the history trajectory line in text with just velocity/acceleration.
-        # The old format prompt doesn't have "recent trajectory" line.
-        import re
-        text_old = sample["text"]
-        # Remove the history trajectory sentence
-        text = re.sub(
-            r"The recent trajectory of the ego vehicle.*?intervals is: \[.*?\]\. ",
-            "",
-            text_old,
-            flags=re.DOTALL,
+        velocity_text = (
+            f"The current velocity of the vehicle is {ego['velocity']:.3f} m/s, "
+            f"and the current acceleration is {ego['acceleration']:.3f} m/s². "
+            "No route or navigation command is available for this clip. Based on "
+            "the observations and current dynamics, plan a safe action trajectory "
+            "for the autonomous vehicle over the next five seconds."
         )
         print("Using OLD prompt format (no history waypoints)")
     else:
-        text = sample["text"]
+        history_xy = ego["history_xy"].tolist()
+        velocity_text = (
+            f"The recent trajectory of the ego vehicle (x, y) in ego frame "
+            f"over the past 2 seconds at 0.5s intervals is: {history_xy}. "
+            f"The current velocity of the vehicle is {ego['velocity']:.3f} m/s, "
+            f"and the current acceleration is {ego['acceleration']:.3f} m/s². "
+            "No route or navigation command is available for this clip. Based on "
+            "the observations and current dynamics, plan a safe action trajectory "
+            "for the autonomous vehicle over the next five seconds."
+        )
+        print("Using NEW prompt format (with history waypoints)")
+
+    user_content = [
+        {"type": "text", "text": "The autonomous vehicle is equipped with three cameras mounted at the front, left, and right, enabling a comprehensive perception of the surrounding environment."},
+        {"type": "text", "text": f"The first video presents the front view of the vehicle, {video_desc}"},
+        {"type": "video", "min_pixels": min_px, "max_pixels": max_px, "sample_fps": sample_rate_hz, "video": cameras["front_camera"]},
+        {"type": "text", "text": f"The second video presents the front-left view of the vehicle, {video_desc}"},
+        {"type": "video", "min_pixels": min_px, "max_pixels": max_px, "sample_fps": sample_rate_hz, "video": cameras["front_left_camera"]},
+        {"type": "text", "text": f"The third video presents the front-right view of the vehicle, {video_desc}"},
+        {"type": "video", "min_pixels": min_px, "max_pixels": max_px, "sample_fps": sample_rate_hz, "video": cameras["front_right_camera"]},
+        {"type": "text", "text": velocity_text},
+    ]
+
+    inference_messages = [
+        {"role": "system", "content": [{"type": "text", "text": system_text}]},
+        {"role": "user", "content": user_content},
+    ]
+
+    text = processor.apply_chat_template(
+        inference_messages,
+        tokenize=False,
+        add_generation_prompt=True,  # <-- KEY: only system+user, no GT answer
+        add_vision_id=True,
+    )
+
+    # Get image/video inputs from the inference messages
+    image_inputs, video_inputs = process_vision_info(inference_messages)
 
     # Print the prompt text (user content)
     print("\n" + "=" * 80)
@@ -259,10 +318,13 @@ def main():
     print(text[:3000])
     print("=" * 80)
 
+    # Print GT for reference
+    action_indices_gt = dataset.matcher.match(ego["gt_xy"], ego["gt_heading"])
+    action_text_gt = "".join(f"<action_{idx}>" for idx in action_indices_gt)
+    print(f"\nGT action indices: {action_indices_gt.tolist()}")
+    print(f"GT action text: {action_text_gt}")
+
     # Prepare model inputs
-    from qwen_vl_utils import process_vision_info
-    image_inputs = sample.get("image_inputs", [])
-    video_inputs = sample.get("video_inputs", [])
     model_inputs = processor(
         text=[text],
         images=image_inputs or None,
@@ -324,51 +386,54 @@ def main():
         print(f"Trajectory last3: {traj[-3:].tolist()}")
         print(f"Completion text:\n{completion_text[:500]}")
 
-    # Plot
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    # Plot — optional, skip if matplotlib not installed
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
-    # Trajectory plot — overlay all samples
-    colors = ["blue", "red", "green", "orange", "purple"]
-    for i, traj in enumerate(all_trajectories):
-        x, y = traj[:, 0], traj[:, 1]
-        ax1.plot(x, y, f"{colors[i % len(colors)]}-o", markersize=5, linewidth=2,
-                 label=f"sample {i+1}", alpha=0.7)
-        ax1.plot(x[0], y[0], "go", markersize=10)
-        ax1.plot(x[-1], y[-1], "rs", markersize=10)
+        # Trajectory plot — overlay all samples
+        colors = ["blue", "red", "green", "orange", "purple"]
+        for i, traj in enumerate(all_trajectories):
+            x, y = traj[:, 0], traj[:, 1]
+            ax1.plot(x, y, f"{colors[i % len(colors)]}-o", markersize=5, linewidth=2,
+                     label=f"sample {i+1}", alpha=0.7)
+            ax1.plot(x[0], y[0], "go", markersize=10)
+            ax1.plot(x[-1], y[-1], "rs", markersize=10)
 
-    # GT trajectory
-    gt_traj = sample["gt_trajectory"].numpy()
-    ax1.plot(gt_traj[:, 0], gt_traj[:, 1], "k--", linewidth=2, label="GT", alpha=0.5)
-    ax1.set_xlabel("x (m)")
-    ax1.set_ylabel("y (m)")
-    ax1.set_title(f"Trajectories (temp={args.temperature}, {args.num_samples} samples)")
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    ax1.set_aspect("equal")
+        # GT trajectory
+        gt_traj = ego["gt_xy"]
+        ax1.plot(gt_traj[:, 0], gt_traj[:, 1], "k--", linewidth=2, label="GT", alpha=0.5)
+        ax1.set_xlabel("x (m)")
+        ax1.set_ylabel("y (m)")
+        ax1.set_title(f"Trajectories (temp={args.temperature}, {args.num_samples} samples)")
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        ax1.set_aspect("equal")
 
-    # Text output
-    text_display = (
-        f"Temperature: {args.temperature}\n"
-        f"Clip: {clip_ids[0]}\n\n"
-    )
-    for i, (ai, ct) in enumerate(zip(all_action_indices, all_completion_texts)):
-        text_display += f"--- Sample {i+1} ---\n"
-        text_display += f"Action indices: {ai}\n"
-        text_display += f"Completion: {ct[:300]}...\n\n"
-    ax2.text(0.02, 0.98, text_display, transform=ax2.transAxes,
-             fontsize=7, verticalalignment="top", fontfamily="monospace",
-             wrap=True)
-    ax2.set_title("Model Output")
-    ax2.axis("off")
+        # Text output
+        text_display = (
+            f"Temperature: {args.temperature}\n"
+            f"Clip: {clip_ids[0]}\n\n"
+        )
+        for i, (ai, ct) in enumerate(zip(all_action_indices, all_completion_texts)):
+            text_display += f"--- Sample {i+1} ---\n"
+            text_display += f"Action indices: {ai}\n"
+            text_display += f"Completion: {ct[:300]}...\n\n"
+        ax2.text(0.02, 0.98, text_display, transform=ax2.transAxes,
+                 fontsize=7, verticalalignment="top", fontfamily="monospace",
+                 wrap=True)
+        ax2.set_title("Model Output")
+        ax2.axis("off")
 
-    plt.tight_layout()
-    output_path = os.path.join(args.output_dir, f"verify_temp{args.temperature}.png")
-    plt.savefig(output_path, dpi=150, bbox_inches="tight")
-    print(f"\nVisualization saved to {output_path}")
+        plt.tight_layout()
+        output_path = os.path.join(args.output_dir, f"verify_temp{args.temperature}.png")
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        print(f"\nVisualization saved to {output_path}")
+    except ImportError:
+        print("\nmatplotlib not installed — skipping visualization")
 
 
 if __name__ == "__main__":
