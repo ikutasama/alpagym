@@ -198,7 +198,7 @@ def main():
     # Load PAI data for a single clip
     sys.path.insert(0, str(Path(__file__).parent.parent / "packages/host/src"))
     # Use the SFT dataset to get a single sample
-    sys.path.insert(0, "/tmp/autovla-sft-pai")
+    sys.path.insert(0, "/data/mnt_m62/10_personal/z59900495/workspace/autovla-sft-pai")
     from pai_sft_dataset import SimplePAIInterface, PAISFTDataset
 
     # Build a minimal config for the dataset
