@@ -124,6 +124,8 @@ def main():
     parser.add_argument("--model-path", default=None,
                         help="Path to Qwen2.5-VL-3B-Instruct (default: auto-detect)")
     parser.add_argument("--output-dir", default="/tmp/autovla_verify")
+    parser.add_argument("--no-history", action="store_true",
+                        help="Use old prompt format without history waypoints (matches step30000 SFT checkpoint)")
     parser.add_argument("--num-samples", type=int, default=3,
                         help="Number of samples at the given temperature")
     args = parser.parse_args()
@@ -233,8 +235,24 @@ def main():
     # Build sample
     sample = dataset._build_sample(clip_ids[0])
 
+    # If --no-history, rebuild text without history waypoints (old format).
+    if args.no_history:
+        # Replace the history trajectory line in text with just velocity/acceleration.
+        # The old format prompt doesn't have "recent trajectory" line.
+        import re
+        text_old = sample["text"]
+        # Remove the history trajectory sentence
+        text = re.sub(
+            r"The recent trajectory of the ego vehicle.*?intervals is: \[.*?\]\. ",
+            "",
+            text_old,
+            flags=re.DOTALL,
+        )
+        print("Using OLD prompt format (no history waypoints)")
+    else:
+        text = sample["text"]
+
     # Print the prompt text (user content)
-    text = sample["text"]
     print("\n" + "=" * 80)
     print("PROMPT TEXT (first 3000 chars):")
     print("=" * 80)
