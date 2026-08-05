@@ -58,7 +58,7 @@ sed -i \
   -e 's|/mnt/mnt_m181/z59900495/workspace/model|/tmp/model|g' \
   -e 's|/mnt/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Qwen/Qwen2.5-VL-3B-Instruct|/tmp/model/Qwen/Qwen2.5-VL-3B-Instruct|g' \
   -e 's|/mnt/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Zewei-Zhou/AutoVLA/AutoVLA_PDMS_89.ckpt|/tmp/model/AutoVLA/AutoVLA_PDMS_89.ckpt|g' \
-  -e 's|/data/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Zewei-Zhou/AutoVLA/autovla_sft_step[0-9]*\.ckpt|/tmp/model/AutoVLA/autovla_sft_step30000.ckpt|g' \
+  -e 's|/data/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Zewei-Zhou/AutoVLA/autovla_sft_step[0-9]*\.ckpt|/tmp/model/AutoVLA/autovla_sft_warmup_step16000.ckpt|g' \
   "$LATEST_DIR/resolved_config.yaml"
 
 sed -i \
