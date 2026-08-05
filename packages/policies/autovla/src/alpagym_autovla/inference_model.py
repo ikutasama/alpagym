@@ -366,10 +366,10 @@ class AutoVLAInferenceModel:
         elif ego_history.shape[0] >= 1:
             hist = ego_history[:, :2]
         else:
-            hist = torch.zeros(1, 2)
+            hist = torch.zeros(1, 2, device=ego_history.device)
         # Pad to exactly 4 points if fewer
         if hist.shape[0] < 4:
-            pad = torch.zeros(4 - hist.shape[0], 2)
+            pad = torch.zeros(4 - hist.shape[0], 2, device=hist.device)
             hist = torch.cat([pad, hist], dim=0)
         # Format: fixed 2 decimal places, always 4 points × 2 coords = 8 values
         history_xy = [[round(float(hist[i, 0]), 2), round(float(hist[i, 1]), 2)]

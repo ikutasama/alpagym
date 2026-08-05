@@ -127,9 +127,9 @@ def _build_qwen_inputs_for_training(
     elif ego_history_xyz.shape[0] >= 1:
         hist = ego_history_xyz[:, :2]
     else:
-        hist = torch.zeros(1, 2)
+        hist = torch.zeros(1, 2, device=ego_history_xyz.device)
     if hist.shape[0] < 4:
-        pad = torch.zeros(4 - hist.shape[0], 2)
+        pad = torch.zeros(4 - hist.shape[0], 2, device=hist.device)
         hist = torch.cat([pad, hist], dim=0)
     history_xy = [[round(float(hist[i, 0]), 2), round(float(hist[i, 1]), 2)]
                    for i in range(4)]
