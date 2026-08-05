@@ -37,7 +37,7 @@ PROFILE_FIELDS=$(\
   uv run --no-sync --all-packages python -m alpagym_host.autovla_a100_config \
   --profile "$PROFILE_PATH" --print-launch-fields)
 IFS=$'\t' read -r PROFILE_CUDA POLICY_REPLICAS ROLLOUT_REPLICAS COSMOS_MODE TRANSPORT_KIND PROFILE_NAME DP_SHARD_SIZE <<< "$PROFILE_FIELDS"
-CUDA_VISIBLE_DEVICES="$PROFILE_CUDA"
+CUDA_VISIBLE_DEVICES="${OVERRIDE_GPU:-$PROFILE_CUDA}"
 
 IFS=',' read -r -a GPU_IDS <<< "$CUDA_VISIBLE_DEVICES"
 if [ "$COSMOS_MODE" = "colocated" ]; then
