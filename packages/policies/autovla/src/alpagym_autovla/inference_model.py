@@ -361,12 +361,15 @@ class AutoVLAInferenceModel:
         # Gives model trajectory shape to reduce lateral jitter.
         # Format with fixed 2 decimal places so tokenization length is
         # consistent across samples (avoids stack size mismatch in mini_batch).
-        if ego_history.shape[0] >= 4:
-            hist = ego_history[-4:, :2]
-        elif ego_history.shape[0] >= 1:
-            hist = ego_history[:, :2]
+        ego_hist = ego_history
+        if ego_hist.dim() > 2:
+            ego_hist = ego_hist.squeeze(0)  # handle [1, T, 3] → [T, 3]
+        if ego_hist.shape[0] >= 4:
+            hist = ego_hist[-4:, :2]
+        elif ego_hist.shape[0] >= 1:
+            hist = ego_hist[:, :2]
         else:
-            hist = torch.zeros(1, 2, device=ego_history.device)
+            hist = torch.zeros(1, 2, device=ego_hist.device)
         # Pad to exactly 4 points if fewer
         if hist.shape[0] < 4:
             pad = torch.zeros(4 - hist.shape[0], 2, device=hist.device)
