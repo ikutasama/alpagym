@@ -359,12 +359,21 @@ class AutoVLAInferenceModel:
 
         # History waypoints for prompt: last 4 positions (past 2s at 0.5s).
         # Gives model trajectory shape to reduce lateral jitter.
+        # Format with fixed 2 decimal places so tokenization length is
+        # consistent across samples (avoids stack size mismatch in mini_batch).
         if ego_history.shape[0] >= 4:
-            history_xy = ego_history[-4:, :2].tolist()
+            hist = ego_history[-4:, :2]
         elif ego_history.shape[0] >= 1:
-            history_xy = ego_history[:, :2].tolist()
+            hist = ego_history[:, :2]
         else:
-            history_xy = [[0.0, 0.0]]
+            hist = torch.zeros(1, 2)
+        # Pad to exactly 4 points if fewer
+        if hist.shape[0] < 4:
+            pad = torch.zeros(4 - hist.shape[0], 2)
+            hist = torch.cat([pad, hist], dim=0)
+        # Format: fixed 2 decimal places, always 4 points × 2 coords = 8 values
+        history_xy = [[round(float(hist[i, 0]), 2), round(float(hist[i, 1]), 2)]
+                       for i in range(4)]
 
         # Build driving instruction from route
         if route_xy.shape[0] > 0:

@@ -121,12 +121,18 @@ def _build_qwen_inputs_for_training(
         acceleration = 0.0
 
     # History waypoints for prompt: last 4 positions (past 2s at 0.5s).
+    # Fixed 2 decimal places + always 4 points for consistent token length.
     if ego_history_xyz.shape[0] >= 4:
-        history_xy = ego_history_xyz[-4:, :2].tolist()
+        hist = ego_history_xyz[-4:, :2]
     elif ego_history_xyz.shape[0] >= 1:
-        history_xy = ego_history_xyz[:, :2].tolist()
+        hist = ego_history_xyz[:, :2]
     else:
-        history_xy = [[0.0, 0.0]]
+        hist = torch.zeros(1, 2)
+    if hist.shape[0] < 4:
+        pad = torch.zeros(4 - hist.shape[0], 2)
+        hist = torch.cat([pad, hist], dim=0)
+    history_xy = [[round(float(hist[i, 0]), 2), round(float(hist[i, 1]), 2)]
+                   for i in range(4)]
 
     # Instruction from route (same as inference)
     if route_xy is not None and route_xy.shape[0] > 0:
