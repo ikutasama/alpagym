@@ -353,7 +353,7 @@ def _update_resolved_config(config: dict[str, Any], profile: A100LaunchProfile) 
     # waypoints). The launch script's sed replacement may not match all
     # path formats, so we set it directly here.
     bundle_config = _mapping(policy_model, "bundle_config")
-    bundle_config["checkpoint_path"] = "/tmp/model/AutoVLA/autovla_sft_warmup_step16000.ckpt"
+    bundle_config["checkpoint_path"] = "/tmp/model/AutoVLA/autovla_sft_warmup_step5000.ckpt"
 
     # Match official alpagym smoke config: 6s total simulation per rollout.
     # control_timestep=200ms, force_gt=1.6s (8 warmup steps),
