@@ -296,6 +296,7 @@ class AutoVLAInferenceModel:
                 qwen_inputs_out = {
                     k: v.cpu() if isinstance(v, torch.Tensor) else v
                     for k, v in model_inputs.items()
+                    if k != "prompt_length"  # avoid varying-length crash in mini_batch stack
                 }
                 qwen_inputs_out["prompt_length"] = prompt_length
             except Exception as exc:
@@ -374,8 +375,10 @@ class AutoVLAInferenceModel:
         if hist.shape[0] < 4:
             pad = torch.zeros(4 - hist.shape[0], 2, device=hist.device)
             hist = torch.cat([pad, hist], dim=0)
-        # Format: fixed 2 decimal places, always 4 points × 2 coords = 8 values
-        history_xy = [[round(float(hist[i, 0]), 2), round(float(hist[i, 1]), 2)]
+        # Format: fixed 2 decimal places as strings, zero-padded to 7 chars
+        # (e.g. "  3.21", " -0.60", " 12.00") so token count is identical
+        # across samples regardless of coordinate magnitude.
+        history_xy = [[f"{float(hist[i, 0]):7.2f}", f"{float(hist[i, 1]):7.2f}"]
                        for i in range(4)]
 
         # Build driving instruction from route
