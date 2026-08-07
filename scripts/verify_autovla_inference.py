@@ -273,7 +273,7 @@ def main():
         )
         print("Using OLD prompt format (no history waypoints)")
     else:
-        history_xy = ego["history_xy"].tolist()
+        history_xy = [[f"{float(v):7.2f}" for v in pt] for pt in ego["history_xy"].tolist()]
         velocity_text = (
             f"The recent trajectory of the ego vehicle (x, y) in ego frame "
             f"over the past 2 seconds at 0.5s intervals is: {history_xy}. "
