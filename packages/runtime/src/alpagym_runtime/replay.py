@@ -284,7 +284,19 @@ def _stack_values(values: list[Any], key: str) -> Any:
         raise ValueError(f"Optional model input {key} mixes None and tensor values")
     first = values[0]
     if isinstance(first, torch.Tensor):
-        return torch.stack(values, dim=0)
+        max_len = max(v.shape[-1] for v in values)
+        padded = []
+        for v in values:
+            if v.shape[-1] < max_len:
+                pad_len = max_len - v.shape[-1]
+                if v.dim() == 2:
+                    p = torch.zeros(v.shape[0], pad_len, dtype=v.dtype, device=v.device)
+                    v = torch.cat([p, v], dim=-1)
+                elif v.dim() == 1:
+                    p = torch.zeros(pad_len, dtype=v.dtype, device=v.device)
+                    v = torch.cat([p, v], dim=-1)
+            padded.append(v)
+        return torch.stack(padded, dim=0)
     if isinstance(first, dict):
         dict_keys = set(first)
         if any(not isinstance(value, dict) or set(value) != dict_keys for value in values):

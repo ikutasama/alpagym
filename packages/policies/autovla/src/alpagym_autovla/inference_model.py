@@ -381,6 +381,12 @@ class AutoVLAInferenceModel:
         history_xy = [[f"{float(hist[i, 0]):7.2f}", f"{float(hist[i, 1]):7.2f}"]
                        for i in range(4)]
 
+        # Debug: log history_xy once per step to verify input data
+        if not hasattr(self, '_debug_logged'):
+            logger.info("DEBUG ego_history raw=%s hist=%s history_xy=%s",
+                        ego_history.shape, hist.tolist(), history_xy)
+            self._debug_logged = True
+
         # Build driving instruction from route
         if route_xy.shape[0] > 0:
             first_wp = route_xy[0]
