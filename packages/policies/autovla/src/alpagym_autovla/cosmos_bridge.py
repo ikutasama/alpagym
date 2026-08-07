@@ -94,7 +94,6 @@ class Qwen2_5_VLWeightMapper(HFModelWeightMapper):
         # Policy uses model.{embed_tokens,layers,norm} — strip language_model
         if name.startswith("model.language_model."):
             name = "model." + name[len("model.language_model."):]
-            logger.info("rollout_map: stripped language_model -> %s", name)
         if name.startswith("visual."):
             return name
         result = self.policy_map_local_key_to_hf_key(name)
