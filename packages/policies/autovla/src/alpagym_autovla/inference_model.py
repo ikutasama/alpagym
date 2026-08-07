@@ -205,6 +205,27 @@ class AutoVLAInferenceModel:
             torch.manual_seed(seed_val)
 
         with torch.no_grad():
+            # Debug: check if FSDP model produces valid logits
+            if not hasattr(self, '_debug_generate'):
+                self._debug_generate = True
+                with torch.no_grad():
+                    outputs = self._vlm(**model_inputs)
+                    logits = outputs.logits  # [1, seq_len, vocab_size]
+                    last_logits = logits[0, -1, :]  # [vocab_size]
+                    # Check action token logits
+                    action_start = 151665
+                    action_logits = last_logits[action_start:action_start+10]
+                    top5 = torch.topk(last_logits, 5)
+                    logger.info(
+                        "DEBUG FSDP logits: shape=%s max=%.3f min=%.3f "
+                        "action_logits_top10=%s top5_ids=%s top5_vals=%s",
+                        tuple(last_logits.shape),
+                        float(last_logits.max()),
+                        float(last_logits.min()),
+                        action_logits.tolist(),
+                        top5.indices.tolist(),
+                        top5.values.tolist(),
+                    )
             prompt_completion_ids = self._vlm.generate(
                 **model_inputs,
                 **gen_kwargs,
