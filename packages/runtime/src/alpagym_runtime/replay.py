@@ -307,4 +307,9 @@ def _stack_values(values: list[Any], key: str) -> Any:
         }
     if all(value == first for value in values):
         return first
+    # Non-tensor values that vary (e.g. prompt_length as int): stack as tensor
+    try:
+        return torch.stack([torch.as_tensor(v) for v in values], dim=0)
+    except (TypeError, RuntimeError):
+        pass
     raise ValueError(f"Unsupported or varying non-tensor model input for {key}")
