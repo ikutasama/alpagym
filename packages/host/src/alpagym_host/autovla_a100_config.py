@@ -355,18 +355,23 @@ def _update_resolved_config(config: dict[str, Any], profile: A100LaunchProfile) 
     bundle_config = _mapping(policy_model, "bundle_config")
     bundle_config["checkpoint_path"] = "/tmp/model/AutoVLA/autovla_sft_warmup_step5000.ckpt"
 
-    # Match official alpagym smoke config: 6s total simulation per rollout.
-    # control_timestep=200ms, force_gt=1.6s (8 warmup steps),
-    # expected_valid_steps=22 → n_sim_steps=30, total=30×0.2s=6s.
-    # With step_dt_us=500ms, 22 valid steps cover 11s — too slow.
-    # Reduce to 10 valid steps: 10×0.5s=5s driving, total=18×0.2s=3.6s.
+    # Ego history must be collected at 0.5s intervals (interval_length) to
+    # match AutoVLA's SFT training. pose_reporting_interval_us=500000 in
+    # extra_overrides ensures the sim reports one pose per 0.5s.
+    # control_timestep=100ms (divides evenly into 500ms), force_gt=8.0s
+    # (16 warmup poses × 0.5s), expected_valid_steps=10 →
+    # n_sim_steps = 10 + 80 = 90, total = 90 × 0.1s = 9.0s.
     alpasim = _mapping(config, "alpasim")
     alpasim["simulation_timeout_s"] = 1800.0
     wizard = _mapping(alpasim, "wizard_args")
-    wizard["control_timestep_us"] = 200000
-    wizard["force_gt_duration_us"] = 1600000
-    # n_sim_steps = expected_valid_steps + force_gt/control = 10 + 8 = 18
-    wizard["n_sim_steps"] = 18
+    wizard["control_timestep_us"] = 100000
+    wizard["force_gt_duration_us"] = 8000000
+    # n_sim_steps = expected_valid_steps + force_gt/control = 10 + 80 = 90
+    wizard["n_sim_steps"] = 90
+    wizard["extra_overrides"] = (
+        "+cameras=3cam_1080"
+        " runtime.simulation_config.pose_reporting_interval_us=500000"
+    )
 
 
 def _update_cosmos_config(config: dict[str, Any], profile: A100LaunchProfile) -> None:
