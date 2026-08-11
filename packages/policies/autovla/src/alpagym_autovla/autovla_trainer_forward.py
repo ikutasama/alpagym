@@ -286,7 +286,7 @@ def _compute_action_logprobs(
     logits = outputs.logits  # [1, L, V]
 
     logits = logits[:, :-1, :]  # [1, L-1, V]
-    target_ids = prompt_completion_ids[:, 1:]  # [1, L-1]
+    target_ids = prompt_completion_ids[:, 1:].to(logits.device)  # [1, L-1]
 
     # Memory-efficient logprob: avoid materializing full [1, L-1, V] float32.
     target_logits = logits.gather(2, target_ids.unsqueeze(-1)).squeeze(-1)
@@ -356,7 +356,7 @@ def _compute_action_logprobs_from_qwen_inputs(
     logits = outputs.logits  # [1, L, V]
 
     logits = logits[:, :-1, :]  # [1, L-1, V]
-    target_ids = prompt_completion_ids[:, 1:]  # [1, L-1]
+    target_ids = prompt_completion_ids[:, 1:].to(logits.device)  # [1, L-1]
 
     # Memory-efficient logprob: avoid materializing full [1, L-1, V] float32.
     target_logits = logits.gather(2, target_ids.unsqueeze(-1)).squeeze(-1)
