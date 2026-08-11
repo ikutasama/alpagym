@@ -365,8 +365,9 @@ class AutoVLAInferenceModel:
                 pil_images.append(Image.fromarray(frame))
 
         # Build velocity/acceleration from ego history
-        if ego_history.shape[0] >= 2:
-            diff = ego_history[1:] - ego_history[:-1]
+        ego_hist_raw = ego_history.squeeze(0) if ego_history.dim() > 2 else ego_history
+        if ego_hist_raw.shape[0] >= 2:
+            diff = ego_hist_raw[1:] - ego_hist_raw[:-1]
             dt = self._interval_length
             velocity = float(torch.norm(diff[-1][:2]).item()) / dt
             if diff.shape[0] >= 2:
