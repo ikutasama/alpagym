@@ -86,6 +86,7 @@ def build_data_packer(run_config: Any, cosmos_role: str | None) -> Any:
             action_token_count=bc.get("action_token_count", 2048),
             num_poses=bc.get("trajectory", {}).get("num_poses", 10),
             use_cot=bc.get("use_cot", False),
+            interval_length=bc.get("trajectory", {}).get("interval_length", 0.5),
         )
 
     # Set SFT checkpoint path so the policy model can load it

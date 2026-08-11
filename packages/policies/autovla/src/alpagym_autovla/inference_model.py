@@ -370,9 +370,10 @@ class AutoVLAInferenceModel:
         # Build velocity/acceleration from ego history
         if ego_history.shape[0] >= 2:
             diff = ego_history[1:] - ego_history[:-1]
-            velocity = float(torch.norm(diff[-1][:2]).item())
+            dt = self._interval_length
+            velocity = float(torch.norm(diff[-1][:2]).item()) / dt
             if diff.shape[0] >= 2:
-                acceleration = float(torch.norm(diff[-1][:2] - diff[-2][:2]).item())
+                acceleration = float(torch.norm(diff[-1][:2] - diff[-2][:2]).item()) / (dt * dt)
             else:
                 acceleration = 0.0
         else:

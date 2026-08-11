@@ -34,6 +34,7 @@ def set_trainer_config(
     action_token_count: int = 2048,
     num_poses: int = 10,
     use_cot: bool = False,
+    interval_length: float = 0.5,
 ) -> None:
     """Store config needed by the patched training forward."""
     _trainer_config["model_path"] = Path(model_path)
@@ -41,6 +42,7 @@ def set_trainer_config(
     _trainer_config["action_token_count"] = action_token_count
     _trainer_config["num_poses"] = num_poses
     _trainer_config["use_cot"] = use_cot
+    _trainer_config["interval_length"] = interval_length
     _trainer_config["_processor"] = None  # lazy init
     _trainer_config["_action_token_ids"] = None  # lazy validation
 
@@ -111,9 +113,10 @@ def _build_qwen_inputs_for_training(
     # Velocity/acceleration from ego history (same as inference)
     if ego_history_xyz.shape[0] >= 2:
         diff = ego_history_xyz[1:] - ego_history_xyz[:-1]
-        velocity = float(torch.norm(diff[-1][:2]).item())
+        dt = _trainer_config.get("interval_length", 0.5)
+        velocity = float(torch.norm(diff[-1][:2]).item()) / dt
         if diff.shape[0] >= 2:
-            acceleration = float(torch.norm(diff[-1][:2] - diff[-2][:2]).item())
+            acceleration = float(torch.norm(diff[-1][:2] - diff[-2][:2]).item()) / (dt * dt)
         else:
             acceleration = 0.0
     else:
