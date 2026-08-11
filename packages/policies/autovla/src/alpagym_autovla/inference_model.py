@@ -488,8 +488,8 @@ class AutoVLAInferenceModel:
         Falls back to single-camera if fewer images available.
         """
         num_images = len(pil_images)
-        min_pixels = 28 * 28 * 140
-        max_pixels = 28 * 28 * 140
+        min_pixels = 28 * 28 * 128
+        max_pixels = 28 * 28 * 128
 
         content = [
             {"type": "text", "text": "The autonomous vehicle is equipped with cameras enabling perception of the surrounding environment."},

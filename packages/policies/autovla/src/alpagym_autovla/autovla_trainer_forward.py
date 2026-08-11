@@ -151,8 +151,8 @@ def _build_qwen_inputs_for_training(
         instruction = "move forward"
 
     # Build user content — mirrors _build_user_content exactly
-    min_pixels = 28 * 28 * 140
-    max_pixels = 28 * 28 * 140
+    min_pixels = 28 * 28 * 128
+    max_pixels = 28 * 28 * 128
     content: list[dict[str, Any]] = [
         {"type": "text", "text": "The autonomous vehicle is equipped with cameras enabling perception of the surrounding environment."},
     ]
