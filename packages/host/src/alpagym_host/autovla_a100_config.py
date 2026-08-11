@@ -434,6 +434,7 @@ def _update_cosmos_config(config: dict[str, Any], profile: A100LaunchProfile) ->
     # 'never' keeps full params in memory (~12GB/GPU for 3.76B on 4x80GB).
     train_config = _mapping(config, "train")
     train_config["fsdp_reshard_after_forward"] = "never"
+    train_config["fsdp_offload"] = True
 
     rollout = _mapping(config, "rollout")
     rollout.update(
