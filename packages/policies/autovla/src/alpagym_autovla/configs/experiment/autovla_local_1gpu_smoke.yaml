@@ -14,7 +14,7 @@ policy:
   inference:
     max_batch_size: 1
     sampling:
-      temperature: 0.9
+      temperature: 0.5
       top_p: 1.0
       top_k: 0
 

@@ -30,7 +30,7 @@ inference:
   sampling:
     top_p: 1.0
     top_k: 0
-    temperature: 0.9
+    temperature: 0.5
     num_traj_samples: 1
     num_traj_sets: 1
     max_generation_length: 2048

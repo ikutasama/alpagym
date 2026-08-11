@@ -191,7 +191,7 @@ class AutoVLAInferenceModel:
         gen_kwargs = {
             "do_sample": True,
             "max_new_tokens": 80,
-            "temperature": sampling.temperature if sampling.temperature else 0.9,
+            "temperature": sampling.temperature if sampling.temperature else 0.5,
             "top_k": sampling.top_k if sampling.top_k else 0,
             "top_p": sampling.top_p if sampling.top_p else 1.0,
         }
