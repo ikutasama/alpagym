@@ -288,8 +288,14 @@ def _compute_action_logprobs(
     logits = logits[:, :-1, :]  # [1, L-1, V]
     target_ids = prompt_completion_ids[:, 1:]  # [1, L-1]
 
-    log_probs = torch.log_softmax(logits.float(), dim=-1)  # [1, L-1, V]
-    per_token_logps = log_probs.gather(2, target_ids.unsqueeze(-1)).squeeze(-1)  # [1, L-1]
+    # Memory-efficient logprob: avoid materializing full [1, L-1, V] float32.
+    target_logits = logits.gather(2, target_ids.unsqueeze(-1)).squeeze(-1)
+    max_logits = logits.max(dim=-1).values
+    shifted = logits - max_logits.unsqueeze(-1)
+    exp_sum = shifted.exp().sum(dim=-1)
+    lse = max_logits.float() + torch.log(exp_sum.float())
+    per_token_logps = target_logits.float() - lse
+    del shifted, exp_sum, max_logits, target_logits, lse
 
     completion_part_ids = target_ids[:, prompt_length - 1:]
     completion_logps = per_token_logps[:, prompt_length - 1:]
@@ -352,8 +358,14 @@ def _compute_action_logprobs_from_qwen_inputs(
     logits = logits[:, :-1, :]  # [1, L-1, V]
     target_ids = prompt_completion_ids[:, 1:]  # [1, L-1]
 
-    log_probs = torch.log_softmax(logits.float(), dim=-1)  # [1, L-1, V]
-    per_token_logps = log_probs.gather(2, target_ids.unsqueeze(-1)).squeeze(-1)  # [1, L-1]
+    # Memory-efficient logprob: avoid materializing full [1, L-1, V] float32.
+    target_logits = logits.gather(2, target_ids.unsqueeze(-1)).squeeze(-1)
+    max_logits = logits.max(dim=-1).values
+    shifted = logits - max_logits.unsqueeze(-1)
+    exp_sum = shifted.exp().sum(dim=-1)
+    lse = max_logits.float() + torch.log(exp_sum.float())
+    per_token_logps = target_logits.float() - lse
+    del shifted, exp_sum, max_logits, target_logits, lse
 
     completion_part_ids = target_ids[:, prompt_length - 1:]
     completion_logps = per_token_logps[:, prompt_length - 1:]
