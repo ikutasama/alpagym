@@ -186,15 +186,12 @@ class AutoVLAInferenceModel:
         # num_poses=10 action tokens + short text + EOS ≈ 30 tokens.
         # 80 gives generous headroom; the original 500 caused 20-min
         # generation stalls when the model didn't emit EOS.
-        # Temperature 0.3: low enough to keep trajectories coherent,
-        # high enough for GRPO group diversity (8 samples per prompt).
-        # Original AutoVLA uses 0.01 (near-greedy), but that produces
-        # nearly identical rollouts, defeating GRPO's group-relative
-        # advantage computation.
+        # Temperature from config (default 0.9): high enough for GRPO
+        # group diversity, low enough to keep trajectories coherent.
         gen_kwargs = {
             "do_sample": True,
             "max_new_tokens": 80,
-            "temperature": 0.01,
+            "temperature": sampling.temperature if sampling.temperature else 0.9,
             "top_k": sampling.top_k if sampling.top_k else 0,
             "top_p": sampling.top_p if sampling.top_p else 1.0,
         }
@@ -405,8 +402,8 @@ class AutoVLAInferenceModel:
 
         # Debug: log history_xy once per step to verify input data
         if not hasattr(self, '_debug_logged'):
-            logger.info("DEBUG ego_history raw=%s hist=%s history_xy=%s",
-                        ego_history.shape, hist.tolist(), history_xy)
+            logger.info("DEBUG ego_history raw=%s hist=%s history_xy=%s velocity=%.3f acceleration=%.3f",
+                        ego_history.shape, hist.tolist(), history_xy, velocity, acceleration)
             self._debug_logged = True
 
         # Build driving instruction from route
@@ -490,8 +487,8 @@ class AutoVLAInferenceModel:
         Falls back to single-camera if fewer images available.
         """
         num_images = len(pil_images)
-        min_pixels = 28 * 28 * 128
-        max_pixels = 28 * 28 * 128
+        min_pixels = 28 * 28 * 140
+        max_pixels = 28 * 28 * 140
 
         content = [
             {"type": "text", "text": "The autonomous vehicle is equipped with cameras enabling perception of the surrounding environment."},
