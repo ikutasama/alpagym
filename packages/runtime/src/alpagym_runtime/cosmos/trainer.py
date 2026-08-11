@@ -427,7 +427,7 @@ class AlpagymGRPOTrainer(_grpo_trainer.GRPOTrainer):
         loss.backward()
         grad_norm = self.all_reduce_states(inter_policy_nccl)
 
-        return self._minibatch_metrics(
+        metrics = self._minibatch_metrics(
             policy_loss=policy_loss,
             kl_loss=kl_loss,
             ratio=ratio,
@@ -437,6 +437,12 @@ class AlpagymGRPOTrainer(_grpo_trainer.GRPOTrainer):
             new_logprobs=new_logprobs,
             grad_norm=grad_norm,
         )
+        # Free activation tensors before the next minibatch's forward.
+        # Without this, new_logprobs/loss/ratio keep autograd graph
+        # references alive, preventing CUDA from reusing that memory.
+        del new_logprobs, kl_div, loss, policy_loss, ratio
+        torch.cuda.empty_cache()
+        return metrics
 
     def _forward_with_reference(
         self,
