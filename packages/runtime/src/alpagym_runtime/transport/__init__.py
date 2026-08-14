@@ -8,7 +8,7 @@ abstraction and its disk and NCCL implementations.
 
 The rollout-to-trainer flow is one-directional. The rollout side's
 :class:`EpisodeWriter` ``write`` returns an opaque string handle; the trainer
-reads that handle back through the data packer (NCCL receiver or disk JSON).
+reads that handle back through the data packer (NCCL receiver or disk file).
 The handle's format is owned by the implementation; callers must not parse it.
 """
 

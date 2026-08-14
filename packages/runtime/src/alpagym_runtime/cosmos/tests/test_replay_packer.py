@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 import torch
 from alpagym_runtime.replay import ActionSelection, DataPackerConfig, PolicyReplayData
-from alpagym_runtime.transport.disk import write_episode_json
+from alpagym_runtime.transport.disk import write_episode
 from alpagym_runtime.types import EpisodeOutput, PolicyOutput, RolloutArtifact
 
 
@@ -329,5 +329,5 @@ def _write_episode(
             policy_outputs=tuple(outputs),
         ),
     )
-    write_episode_json(Path(artifact.handle), artifact.episode)
+    write_episode(Path(artifact.handle), artifact.episode)
     return artifact

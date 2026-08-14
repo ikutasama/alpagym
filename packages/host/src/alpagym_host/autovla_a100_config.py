@@ -21,6 +21,7 @@ _PROFILE_KEYS = {
     "mode",
     "transport",
     "dp_shard_size",
+    "alpasim_topology",
     "policy_replicas",
     "rollout_replicas",
     "n_generation",
@@ -126,6 +127,7 @@ class A100LaunchProfile:
     mode: str
     transport: str
     dp_shard_size: int
+    alpasim_topology: str
     geometry: A100TrainGeometry
 
     @property
@@ -209,6 +211,7 @@ def load_a100_profile(path: Path) -> A100LaunchProfile:
         mode=_require_str(raw, "mode"),
         transport=_require_str(raw, "transport"),
         dp_shard_size=_require_int(raw, "dp_shard_size"),
+        alpasim_topology=_require_str(raw, "alpasim_topology"),
         geometry=A100TrainGeometry(
             policy_replicas=_require_int(raw, "policy_replicas"),
             rollout_replicas=_require_int(raw, "rollout_replicas"),
@@ -343,6 +346,9 @@ def _update_resolved_config(config: dict[str, Any], profile: A100LaunchProfile) 
     inference = _mapping(_mapping(config, "policy"), "inference")
     inference["max_batch_size"] = geometry.max_inference_batch_size
 
+    sampling = _mapping(inference, "sampling")
+    sampling["temperature"] = 0.5
+
     # Fix step_dt_us to match AutoVLA's 0.5s trajectory interval (10 poses × 0.5s = 5s).
     # The wizard default is 100000 (100ms) which compresses 5s trajectory into 1s,
     # causing 5x speed and gRPC timeouts.
@@ -359,18 +365,22 @@ def _update_resolved_config(config: dict[str, Any], profile: A100LaunchProfile) 
     # match AutoVLA's SFT training. pose_reporting_interval_us=500000 in
     # extra_overrides ensures the sim reports one pose per 0.5s.
     # control_timestep=100ms (divides evenly into 500ms), force_gt=8.0s
-    # (16 warmup poses × 0.5s), expected_valid_steps=10 →
-    # n_sim_steps = 10 + 80 = 90, total = 90 × 0.1s = 9.0s.
+    # (16 warmup poses × 0.5s), expected_valid_steps=22 →
+    # n_sim_steps = 22 + 80 = 102, total = 102 × 0.1s = 10.2s.
     alpasim = _mapping(config, "alpasim")
     alpasim["simulation_timeout_s"] = 1800.0
+    alpasim["repo_path"] = "/data/mnt_m62/10_personal/z59900495/workspace/alpasim"
+    alpasim["repo_url"] = None
+    alpasim["repo_ref"] = None
     wizard = _mapping(alpasim, "wizard_args")
+    wizard["topology"] = profile.alpasim_topology
     wizard["control_timestep_us"] = 100000
     wizard["force_gt_duration_us"] = 8000000
-    # n_sim_steps = expected_valid_steps + force_gt/control = 10 + 80 = 90
-    wizard["n_sim_steps"] = 90
+    wizard["n_sim_steps"] = 102
     wizard["extra_overrides"] = (
         "+cameras=3cam_1080"
         " runtime.simulation_config.pose_reporting_interval_us=500000"
+        " scenes.local_usdz_dir=/data/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/nvidia/PhysicalAI-Autonomous-Vehicles-NuRec/sample_set/26.02_release"
     )
 
 
@@ -434,6 +444,10 @@ def _update_cosmos_config(config: dict[str, Any], profile: A100LaunchProfile) ->
     # 'never' keeps full params in memory (~12GB/GPU for 3.76B on 4x80GB).
     train_config = _mapping(config, "train")
     train_config["fsdp_reshard_after_forward"] = "never"
+    # Disable FSDP CPU offload: with 1 policy replica and dp_shard_size=1,
+    # the 3.76B model + AdamW states fit on a single 80GB A100. CPU offload
+    # causes RAM pressure (60GB+ per replica) and slows training.
+    train_config["fsdp_offload"] = False
 
     rollout = _mapping(config, "rollout")
     rollout.update(
@@ -443,6 +457,12 @@ def _update_cosmos_config(config: dict[str, Any], profile: A100LaunchProfile) ->
             "prefetch_rollout": False,
         }
     )
+    rollout["sampling_config"] = {
+        "temperature": 0.5,
+        "top_p": 1.0,
+        "top_k": -1,
+        "repetition_penalty": 1.0,
+    }
     _mapping(config, "logging")["experiment_name"] = geometry.experiment_name
 
 

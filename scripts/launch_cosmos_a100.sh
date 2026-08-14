@@ -23,6 +23,9 @@ case "$PROFILE_SELECTOR" in
   4gpu)
     PROFILE_PATH="$ALPAGYM_DIR/packages/policies/autovla/src/alpagym_autovla/configs/a100/autovla_a100_4gpu.yaml"
     ;;
+  4gpu_sim)
+    PROFILE_PATH="$ALPAGYM_DIR/packages/policies/autovla/src/alpagym_autovla/configs/a100/autovla_a100_4gpu_sim.yaml"
+    ;;
   *)
     PROFILE_PATH="$PROFILE_SELECTOR"
     ;;
@@ -138,9 +141,9 @@ print(f"  Tunnel/runtime ready on {runtime_port}; driver port {driver_port} is f
 PY
 
 cd "$ALPAGYM_DIR"
-AUTOVLA_REPO_PATH=/data/mnt_m62/10_personal/z59900495/workspace/AutoVLA \
-HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1 \
-\
+export AUTOVLA_REPO_PATH=/data/mnt_m62/10_personal/z59900495/workspace/AutoVLA
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
+
 uv run --no-sync --all-packages python -m cosmos_rl.launcher.launch_all \
   --config "$LATEST_DIR/cosmos_config.toml" \
   --policy "$POLICY_REPLICAS" --rollout "$ROLLOUT_REPLICAS" \

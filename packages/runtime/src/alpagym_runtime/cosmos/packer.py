@@ -43,7 +43,7 @@ from alpagym_runtime.replay import (
     clone_model_inputs,
 )
 from alpagym_runtime.transport import EpisodeWriter
-from alpagym_runtime.transport.disk import DiskEpisodeWriter, read_episode_json
+from alpagym_runtime.transport.disk import DiskEpisodeWriter, read_episode
 from alpagym_runtime.types import EpisodeOutput
 
 if TYPE_CHECKING:
@@ -174,12 +174,12 @@ class AlpagymDataPacker(DataPacker):
         """
         del sample, n_ignore_prefix_tokens, kwargs
         # nccl handles arrive already resolved inline to an EpisodeOutput (see
-        # NcclDataPackerMixin); disk handles are JSON artifact paths read here.
+        # NcclDataPackerMixin); disk handles are artifact paths read here.
         if isinstance(rollout_output, EpisodeOutput):
             episode = rollout_output
         else:
             with timed_scope("trainer/artifact_load/disk_read", category="io"):
-                episode = read_episode_json(rollout_output)
+                episode = read_episode(rollout_output)
 
         replay_rows: list[PolicyReplayData] = []
         for output in episode.policy_outputs:
