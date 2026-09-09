@@ -279,9 +279,9 @@ def _update_resolved_config(config: dict[str, Any], profile: A100LaunchProfile) 
     # penalizes collision/offroad, plus a small GT-deviation term.
     config["reward"] = {
         "terms": [
-            {"kind": "metric", "metric_name": "progress", "scale": 1.0},
-            {"kind": "metric", "metric_name": "collision_any", "scale": -10.0},
-            {"kind": "metric", "metric_name": "offroad", "scale": -5.0},
+            {"kind": "metric", "metric_name": "progress", "scale": 5.0},
+            {"kind": "metric", "metric_name": "collision_any", "scale": -2.0},
+            {"kind": "metric", "metric_name": "offroad", "scale": -1.0},
             {"kind": "distance_to_gt", "scale": -0.01},
         ]
     }
@@ -338,7 +338,7 @@ def _update_resolved_config(config: dict[str, Any], profile: A100LaunchProfile) 
         {
             "n_generation": geometry.n_generation,
             "batch_size": geometry.rollout_batch_size,
-            "prefetch_rollout": False,
+            "prefetch_rollout": profile.mode == "disaggregated",
         }
     )
     _mapping(cosmos, "logging")["experiment_name"] = geometry.experiment_name
@@ -360,15 +360,16 @@ def _update_resolved_config(config: dict[str, Any], profile: A100LaunchProfile) 
     # path formats, so we set it directly here.
     bundle_config = _mapping(policy_model, "bundle_config")
     bundle_config["checkpoint_path"] = "/tmp/model/AutoVLA/autovla_sft_warmup_step5000.ckpt"
+    bundle_config["use_cot"] = True
 
     # Ego history must be collected at 0.5s intervals (interval_length) to
     # match AutoVLA's SFT training. pose_reporting_interval_us=500000 in
     # extra_overrides ensures the sim reports one pose per 0.5s.
     # control_timestep=100ms (divides evenly into 500ms), force_gt=8.0s
-    # (16 warmup poses × 0.5s), expected_valid_steps=22 →
-    # n_sim_steps = 22 + 80 = 102, total = 102 × 0.1s = 10.2s.
+    # (16 warmup poses × 0.5s), expected_valid_steps=24 →
+    # n_sim_steps = 24 + 80 = 104, total = 104 × 0.1s = 10.4s.
     alpasim = _mapping(config, "alpasim")
-    alpasim["simulation_timeout_s"] = 1800.0
+    alpasim["simulation_timeout_s"] = 3600.0
     alpasim["repo_path"] = "/data/mnt_m62/10_personal/z59900495/workspace/alpasim"
     alpasim["repo_url"] = None
     alpasim["repo_ref"] = None
@@ -376,7 +377,11 @@ def _update_resolved_config(config: dict[str, Any], profile: A100LaunchProfile) 
     wizard["topology"] = profile.alpasim_topology
     wizard["control_timestep_us"] = 100000
     wizard["force_gt_duration_us"] = 8000000
-    wizard["n_sim_steps"] = 102
+    wizard["n_sim_steps"] = 104
+
+    # Match expected_valid_steps to n_sim_steps - warmup_steps.
+    # warmup_steps = force_gt_duration_us / control_timestep_us = 80.
+    config["expected_valid_steps"] = 24
     wizard["extra_overrides"] = (
         "+cameras=3cam_1080"
         " runtime.simulation_config.pose_reporting_interval_us=500000"
@@ -430,31 +435,41 @@ def _update_cosmos_config(config: dict[str, Any], profile: A100LaunchProfile) ->
     rollout_parallelism = _mapping(_mapping(config, "rollout"), "parallelism")
     rollout_parallelism["dp_shard_size"] = profile.dp_shard_size
 
-    # Disable gradient checkpointing so mini_batch>1 works with FSDP.
-    # Gradient checkpointing re-runs forward in backward, producing regular
-    # Tensors that conflict with FSDP's DTensor parameters (aten.mul crash).
-    # 3.76B model on 80GB A100 fits without checkpointing.
+    # Gradient checkpointing trades compute for memory. In colocated mode
+    # the DAgger SFT forward adds a second forward on top of GRPO's, so
+    # both sets of activations need checkpointing to fit in 80GB alongside
+    # vLLM. In disaggregated mode the policy GPU has full 80GB to itself,
+    # so checkpointing is unnecessary and only slows training.
     policy = _mapping(config, "policy")
-    policy["model_gradient_checkpointing"] = False
+    # Gradient checkpointing trades ~30% step time for 3-5x smaller
+    # activation memory. Disaggregated DAgger OOM'd without it: the
+    # uncheckpointed training forward + reference forward spiked +34GB
+    # on top of the 45.5GB steady state (VRAM-GUARD evidence), blowing
+    # the 79GB card. Host-RAM offload is not viable on this shared box
+    # (3 replicas need ~150GB host RAM; only ~43GB available).
+    policy["model_gradient_checkpointing"] = True
 
-    # In colocated mode with FSDP, keep model unsharded after forward so
-    # that model.generate() during rollout doesn't trigger all-gather on
-    # every token. With 'default', FSDP reshards after each forward pass,
-    # making 500-token generation take ~10 minutes (gRPC 600s timeout).
-    # 'never' keeps full params in memory (~12GB/GPU for 3.76B on 4x80GB).
     train_config = _mapping(config, "train")
     train_config["fsdp_reshard_after_forward"] = "never"
-    # Disable FSDP CPU offload: with 1 policy replica and dp_shard_size=1,
-    # the 3.76B model + AdamW states fit on a single 80GB A100. CPU offload
-    # causes RAM pressure (60GB+ per replica) and slows training.
+    # CPU offload moves optimizer states to host RAM. Reverted: this shared
+    # host has only ~43GB RAM available and 3 offloaded replicas need
+    # ~150GB, causing kernel OOM kills (dmesg 01:41:58). Gradient
+    # checkpointing now bounds the GPU spike instead.
     train_config["fsdp_offload"] = False
 
     rollout = _mapping(config, "rollout")
+    is_colocated = profile.mode == "colocated"
     rollout.update(
         {
             "n_generation": geometry.n_generation,
             "batch_size": geometry.rollout_batch_size,
-            "prefetch_rollout": False,
+            "prefetch_rollout": profile.mode == "disaggregated",
+            # Colocated: vLLM shares the GPU with FSDP training, so it must
+            # leave room for training activations (~44GB).
+            # Disaggregated: vLLM has a dedicated GPU (possibly sharing with
+            # the expert service at ~22GB), so 0.5 gives ~40GB—plenty for
+            # the 3B model + KV cache while leaving room for the expert.
+            "gpu_memory_utilization": 0.45 if is_colocated else 0.5,
         }
     )
     rollout["sampling_config"] = {

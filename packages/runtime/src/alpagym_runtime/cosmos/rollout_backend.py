@@ -243,8 +243,23 @@ class AlpagymRollout(RolloutBase):
         # a non-empty list; its _filter_valid_rollout_results_and_report then
         # drops entries with empty completions without crashing.
         results: list[RolloutResult] = []
+        rollout_timeout = (
+            (self._worker._max_scene_retries + 1)
+            * float(self._run_config.alpasim.simulation_timeout_s)
+            + 120.0
+        )
         for payload_state in payload_states:
-            episodes = payload_state.future.result()
+            try:
+                episodes = payload_state.future.result(timeout=rollout_timeout)
+            except TimeoutError:
+                logger.error(
+                    "Rollout future timed out after %.0fs: prompt_idx=%s -- "
+                    "treating as partial (collected=0/%d)",
+                    rollout_timeout,
+                    payload_state.payload.prompt_idx,
+                    payload_state.n_target,
+                )
+                episodes = []
             if len(episodes) < payload_state.n_target:
                 logger.warning(
                     "Partial rollout: prompt_idx=%s collected=%d/%d",

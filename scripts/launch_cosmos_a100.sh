@@ -8,7 +8,7 @@ RUNTIME_PORT="${RUNTIME_PORT:-5011}"
 DRIVER_PORT="${DRIVER_PORT:-5012}"
 
 if [ "$#" -gt 1 ]; then
-  echo "Usage: $0 [1gpu|4gpu|/path/to/profile.yaml]" >&2
+  echo "Usage: $0 [1gpu|2gpu|2gpu_dagger|4gpu|4gpu_dagger|4gpu_grpo|4gpu_sim|/path/to/profile.yaml]" >&2
   exit 2
 fi
 
@@ -20,8 +20,17 @@ case "$PROFILE_SELECTOR" in
   2gpu)
     PROFILE_PATH="$ALPAGYM_DIR/packages/policies/autovla/src/alpagym_autovla/configs/a100/autovla_a100_2gpu.yaml"
     ;;
+  2gpu_dagger)
+    PROFILE_PATH="$ALPAGYM_DIR/packages/policies/autovla/src/alpagym_autovla/configs/a100/autovla_a100_2gpu_dagger.yaml"
+    ;;
   4gpu)
     PROFILE_PATH="$ALPAGYM_DIR/packages/policies/autovla/src/alpagym_autovla/configs/a100/autovla_a100_4gpu.yaml"
+    ;;
+  4gpu_dagger)
+    PROFILE_PATH="$ALPAGYM_DIR/packages/policies/autovla/src/alpagym_autovla/configs/a100/autovla_a100_4gpu_dagger.yaml"
+    ;;
+  4gpu_grpo)
+    PROFILE_PATH="$ALPAGYM_DIR/packages/policies/autovla/src/alpagym_autovla/configs/a100/autovla_a100_4gpu_grpo.yaml"
     ;;
   4gpu_sim)
     PROFILE_PATH="$ALPAGYM_DIR/packages/policies/autovla/src/alpagym_autovla/configs/a100/autovla_a100_4gpu_sim.yaml"
@@ -57,19 +66,23 @@ fi
 echo "[1/4] Loading $PROFILE_NAME and fixing copied-run paths ..."
 sed -i \
   -e 's|tmp/alpagym-runs/[^/]*/|'"$LATEST_DIR"'/|g' \
-  -e 's|/mnt/mnt_m62|/data/mnt_m62|g' \
-  -e 's|/mnt/mnt_m181/z59900495/workspace/model|/tmp/model|g' \
   -e 's|/mnt/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Qwen/Qwen2.5-VL-3B-Instruct|/tmp/model/Qwen/Qwen2.5-VL-3B-Instruct|g' \
+  -e 's|/data/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Qwen/Qwen2.5-VL-3B-Instruct|/tmp/model/Qwen/Qwen2.5-VL-3B-Instruct|g' \
   -e 's|/mnt/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Zewei-Zhou/AutoVLA/AutoVLA_PDMS_89.ckpt|/tmp/model/AutoVLA/AutoVLA_PDMS_89.ckpt|g' \
+  -e 's|/data/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Zewei-Zhou/AutoVLA/AutoVLA_PDMS_89.ckpt|/tmp/model/AutoVLA/AutoVLA_PDMS_89.ckpt|g' \
   -e 's|/data/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Zewei-Zhou/AutoVLA/autovla_sft_step[0-9]*\.ckpt|/tmp/model/AutoVLA/autovla_sft_warmup_step5000.ckpt|g' \
+  -e 's|/mnt/mnt_m181/z59900495/workspace/model|/tmp/model|g' \
+  -e 's|/mnt/mnt_m62|/data/mnt_m62|g' \
   "$LATEST_DIR/resolved_config.yaml"
 
 sed -i \
   -e 's|^resolved_config_path.*|resolved_config_path = "'"$LATEST_DIR"'/resolved_config.yaml"|' \
+  -e 's|/mnt/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Qwen/Qwen2.5-VL-3B-Instruct|/tmp/model/Qwen/Qwen2.5-VL-3B-Instruct|g' \
+  -e 's|/data/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Qwen/Qwen2.5-VL-3B-Instruct|/tmp/model/Qwen/Qwen2.5-VL-3B-Instruct|g' \
+  -e 's|/mnt/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Zewei-Zhou/AutoVLA/AutoVLA_PDMS_89.ckpt|/tmp/model/AutoVLA/AutoVLA_PDMS_89.ckpt|g' \
+  -e 's|/data/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Zewei-Zhou/AutoVLA/AutoVLA_PDMS_89.ckpt|/tmp/model/AutoVLA/AutoVLA_PDMS_89.ckpt|g' \
   -e 's|/mnt/mnt_m181/z59900495/workspace/model|/tmp/model|g' \
   -e 's|/mnt/mnt_m62|/data/mnt_m62|g' \
-  -e 's|/mnt/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Qwen/Qwen2.5-VL-3B-Instruct|/tmp/model/Qwen/Qwen2.5-VL-3B-Instruct|g' \
-  -e 's|/mnt/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Zewei-Zhou/AutoVLA/AutoVLA_PDMS_89.ckpt|/tmp/model/AutoVLA/AutoVLA_PDMS_89.ckpt|g' \
   "$LATEST_DIR/cosmos_config.toml"
 
 echo "[2/4] Configuring matched rollout and policy geometry ..."
@@ -102,6 +115,7 @@ else
 fi
 
 echo "[4/4] Launching cosmos ..."
+ulimit -n 1048576
 unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY grpc_proxy GRPC_PROXY all_proxy ALL_PROXY
 export GRPC_ARG_ENABLE_HTTP_PROXY=0 no_proxy='localhost,127.0.0.1,0.0.0.0' NO_PROXY='localhost,127.0.0.1,0.0.0.0'
 export TMPDIR="$TMPDIR" GLOO_TIMEOUT_SECONDS="${GLOO_TIMEOUT_SECONDS:-3600}"
@@ -118,6 +132,7 @@ if [ "$COSMOS_MODE" = "disaggregated" ] || [ "$TRANSPORT_KIND" = "nccl" ]; then
   export NCCL_TIMEOUT="${NCCL_TIMEOUT:-1800}"
   export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
   export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
+  export COSMOS_NCCL_TIMEOUT_MS="${COSMOS_NCCL_TIMEOUT_MS:-1800000}"
 else
   unset NCCL_SHM_DISABLE NCCL_DEBUG NCCL_IB_DISABLE NCCL_SOCKET_IFNAME
   unset NCCL_TIMEOUT NCCL_P2P_DISABLE TORCH_NCCL_ASYNC_ERROR_HANDLING
@@ -137,7 +152,7 @@ try:
     probe.bind(("127.0.0.1", driver_port))
 finally:
     probe.close()
-print(f"  Tunnel/runtime ready on {runtime_port}; driver port {driver_port} is free")
+print(f"  Tunnel/runtime ready on {runtime_port}; driver port {driver_port} free for EgodriverServer")
 PY
 
 cd "$ALPAGYM_DIR"

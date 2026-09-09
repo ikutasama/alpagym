@@ -6,7 +6,7 @@ import os
 import threading
 from concurrent import futures
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
 import grpc
 from alpagym_host.endpoint_registry import TopologyEndpoint
@@ -43,6 +43,28 @@ from alpagym_runtime.types import (
 
 logger = logging.getLogger(__name__)
 
+_EXPERT_ENABLED = os.environ.get("ALPAGYM_EXPERT_HOST", "") != ""
+_EXPERT_HOST = os.environ.get("ALPAGYM_EXPERT_HOST", "localhost")
+_EXPERT_PORT = int(os.environ.get("ALPAGYM_EXPERT_PORT", "5557"))
+_DAGGER_MIX_BETA = float(os.environ.get("ALPAGYM_DAGGER_MIX_BETA", "0.0"))
+
+_expert_client = None
+if _EXPERT_ENABLED:
+    try:
+        import sys as _sys
+        _dagger_scripts = str(
+            __import__("pathlib").Path(__file__).resolve().parents[5]
+            / "scripts" / "dagger"
+        )
+        if _dagger_scripts not in _sys.path:
+            _sys.path.insert(0, _dagger_scripts)
+        from expert_client import ExpertClient  # type: ignore[import-not-found]
+        _expert_client = ExpertClient(host=_EXPERT_HOST, port=_EXPERT_PORT)
+        logger.info("Expert client enabled: %s:%d", _EXPERT_HOST, _EXPERT_PORT)
+    except Exception as e:
+        logger.warning("Failed to init expert client: %s — expert labeling disabled", e)
+        _EXPERT_ENABLED = False
+
 
 @dataclass(frozen=True)
 class SessionRecord:
@@ -65,6 +87,11 @@ class _Session:
     ground_truth: GroundTruth | None = None
     outputs: list[PolicyOutput] = field(default_factory=list)
     executed_poses: list[EgoPose] = field(default_factory=list)
+    expert_futures: list[Any] = field(default_factory=list)
+    expert_action_tokens: list[Any] = field(default_factory=list)
+    expert_collector_done: threading.Event = field(default_factory=threading.Event)
+    ade_list: list[float] = field(default_factory=list)
+    fde_list: list[float] = field(default_factory=list)
 
     def consume_tick(self) -> tuple[int, TickBuffer]:
         """Return the current tick and prepare the next tick buffer."""
@@ -112,6 +139,7 @@ class EgodriverGrpcServicer:
         self._sessions: dict[str, _Session] = {}
         self._sessions_lock = threading.Lock()
         self._session_records: dict[str, SessionRecord] = {}
+        self._expert_collector_events: dict[str, threading.Event] = {}
 
     @measure_perf("driver/session_start", category="orchestration", cpu_snapshot=True)
     def start_session(
@@ -219,6 +247,110 @@ class EgodriverGrpcServicer:
             torch.cuda.empty_cache()
             context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, f"CUDA error in policy step: {oom_exc}")
         session.record_step(policy_input, policy_output)
+
+        if _EXPERT_ENABLED and _expert_client is not None:
+            try:
+                rd = policy_output.replay_data
+                if rd is not None and "model_input" in rd.payload:
+                    mi = rd.payload["model_input"]
+                    import torch as _torch
+                    import numpy as _np
+                    import random as _random
+                    def _to_tensor(v):
+                        return v if isinstance(v, _torch.Tensor) else _torch.as_tensor(v)
+                    cf = _to_tensor(mi["camera_frames"])
+                    ci = _to_tensor(mi["camera_indices"])
+                    hist_xyz = _to_tensor(mi["ego_history_xyz"])
+                    hist_rot = _to_tensor(mi["ego_history_rot"])
+                    future = _expert_client.async_query(cf, ci, hist_xyz, hist_rot)
+
+                    if _DAGGER_MIX_BETA > 0.0:
+                        result = future.result(timeout=120)
+                        if result is not None and "action_indices" in result:
+                            action_tokens = _torch.tensor(
+                                result["action_indices"], dtype=_torch.int64,
+                            )
+                            rd.payload["expert_action_tokens"] = action_tokens
+
+                            use_expert = _random.random() < _DAGGER_MIX_BETA
+                            if "expert_xyz" in result and "expert_rot" in result:
+                                from alpagym_runtime.policies.alpamayo.output_trajectory import (
+                                    build_policy_output_trajectory,
+                                )
+                                expert_xyz = _np.asarray(result["expert_xyz"])
+                                expert_rot = _np.asarray(result["expert_rot"])
+                                step = max(1, int(round(0.5 / 0.1)))
+                                indices = [min(i * step, expert_xyz.shape[0] - 1) for i in range(10)]
+                                future_xyz_ego = _torch.tensor(
+                                    expert_xyz[indices], dtype=_torch.float32,
+                                )
+                                future_rot_ego = _torch.tensor(
+                                    expert_rot[indices], dtype=_torch.float32,
+                                )
+                                future_dt_us = _torch.arange(1, 11, dtype=_torch.int64) * 500000
+                                ego_pose_now = policy_input.ego_trajectory.poses[-1].pose
+                                exp_xyz, exp_quat, exp_dt = build_policy_output_trajectory(
+                                    ego_pose_now=ego_pose_now,
+                                    future_xyz_ego=future_xyz_ego,
+                                    future_rot_ego=future_rot_ego,
+                                    future_dt_us=future_dt_us,
+                                )
+
+                                student_xyz = policy_output.chosen_xyz
+                                ade = _torch.norm(
+                                    student_xyz[1:] - exp_xyz[1:], dim=-1,
+                                ).mean().item()
+                                fde = _torch.norm(
+                                    student_xyz[-1] - exp_xyz[-1],
+                                ).item()
+                                rd.payload["ade"] = ade
+                                rd.payload["fde"] = fde
+                                session.ade_list.append(ade)
+                                session.fde_list.append(fde)
+
+                                if use_expert:
+                                    from dataclasses import replace as _replace
+                                    policy_output = _replace(
+                                        policy_output,
+                                        chosen_xyz=exp_xyz,
+                                        chosen_quat=exp_quat,
+                                        chosen_dt_us=exp_dt,
+                                    )
+                                    logger.info(
+                                        "  step %d EXPERT drives (beta=%.2f) tokens=%s "
+                                        "ade=%.3f fde=%.3f (%.1fs)",
+                                        step_index, _DAGGER_MIX_BETA, action_tokens.tolist(),
+                                        ade, fde, result.get("elapsed", 0),
+                                    )
+                                else:
+                                    logger.info(
+                                        "  step %d AutoVLA drives (beta=%.2f) expert_tokens=%s "
+                                        "ade=%.3f fde=%.3f",
+                                        step_index, _DAGGER_MIX_BETA, action_tokens.tolist(),
+                                        ade, fde,
+                                    )
+                            elif use_expert:
+                                logger.warning(
+                                    "  step %d expert drives but no expert_xyz, AutoVLA fallback",
+                                    step_index,
+                                )
+                            else:
+                                logger.info(
+                                    "  step %d AutoVLA drives (beta=%.2f) expert_tokens=%s",
+                                    step_index, _DAGGER_MIX_BETA, action_tokens.tolist(),
+                                )
+                            session.expert_futures.append(None)
+                        else:
+                            logger.warning("  step %d expert query failed, AutoVLA fallback", step_index)
+                            session.expert_futures.append(None)
+                    else:
+                        session.expert_futures.append(future)
+                else:
+                    session.expert_futures.append(None)
+            except Exception as e:
+                logger.warning("Expert async_query failed at step %d: %s", step_index, e)
+                session.expert_futures.append(None)
+
         return drive_response_from_policy_output(policy_input, policy_output)
 
     @measure_perf("driver/session_close", category="synchronization_wait")
@@ -227,13 +359,36 @@ class EgodriverGrpcServicer:
         request: DriveSessionCloseRequest,
         context: grpc.ServicerContext,
     ) -> Empty:
-        """Close one AlpaSim driver session and freeze its record."""
+        """Close one AlpaSim driver session and freeze its record.
+
+        If expert labeling is enabled, a background thread collects the
+        pending expert futures so this RPC returns immediately without
+        blocking the AlPaSim ``simulate()`` deadline.  ``pop_session_record``
+        waits for the collector to finish before handing the record to the
+        rollout worker.
+        """
         session_uuid = str(request.session_uuid)
         with self._sessions_lock:
             session = self._sessions.pop(session_uuid)
+
         self._session_records[session_uuid] = session.get_record()
+
+        if _EXPERT_ENABLED and session.expert_futures:
+            self._expert_collector_events[session_uuid] = session.expert_collector_done
+            logger.info(
+                "Collecting %d expert futures for session=%s",
+                len(session.expert_futures), session_uuid,
+            )
+            collector = threading.Thread(
+                target=self._collect_expert_futures,
+                args=(session_uuid, session),
+                daemon=True,
+            )
+            collector.start()
+        else:
+            session.expert_collector_done.set()
+
         session.policy.close()
-        del session
         import torch
         torch.cuda.empty_cache()
         logger.info(
@@ -243,8 +398,130 @@ class EgodriverGrpcServicer:
         )
         return Empty()
 
+    def _collect_expert_futures(self, session_uuid: str, session: _Session) -> None:
+        """Collect expert futures in the background and inject tokens into the frozen record."""
+        import torch
+        expert_results: list[dict | None] = []
+        for i, future in enumerate(session.expert_futures):
+            if future is None:
+                session.expert_action_tokens.append(None)
+                expert_results.append(None)
+                continue
+            try:
+                result = future.result(timeout=600)
+                if result is not None and "action_indices" in result:
+                    tokens = torch.tensor(result["action_indices"], dtype=torch.int64)
+                    session.expert_action_tokens.append(tokens)
+                    expert_results.append(result)
+                    logger.info(
+                        "  step %d expert tokens=%s (%.1fs)",
+                        i, tokens.tolist(), result.get("elapsed", 0),
+                    )
+                else:
+                    session.expert_action_tokens.append(None)
+                    expert_results.append(None)
+            except Exception as e:
+                logger.warning("  step %d expert future failed: %s", i, e)
+                session.expert_action_tokens.append(None)
+                expert_results.append(None)
+
+        record = self._session_records.get(session_uuid)
+        if record is not None:
+            for i, output in enumerate(record.outputs):
+                if i >= len(session.expert_action_tokens):
+                    break
+                et = session.expert_action_tokens[i]
+                if et is not None and output.replay_data is not None:
+                    output.replay_data.payload["expert_action_tokens"] = et
+
+                    result = expert_results[i]
+                    if (
+                        result is not None
+                        and "expert_xyz" in result
+                        and "expert_rot" in result
+                    ):
+                        import numpy as _np
+                        from alpagym_runtime.policies.alpamayo.output_trajectory import (
+                            build_policy_output_trajectory,
+                        )
+                        from alpagym_runtime.types import Pose, Vec3, Quaternion
+
+                        expert_xyz = _np.asarray(result["expert_xyz"])
+                        expert_rot = _np.asarray(result["expert_rot"])
+                        step = max(1, int(round(0.5 / 0.1)))
+                        indices = [min(i * step, expert_xyz.shape[0] - 1) for i in range(10)]
+                        future_xyz_ego = torch.tensor(
+                            expert_xyz[indices], dtype=torch.float32,
+                        )
+                        future_rot_ego = torch.tensor(
+                            expert_rot[indices], dtype=torch.float32,
+                        )
+                        future_dt_us = torch.arange(1, 11, dtype=torch.int64) * 500000
+
+                        student_xyz = output.chosen_xyz
+                        student_quat = output.chosen_quat
+                        ego_pose_now = Pose(
+                            vec=Vec3(
+                                x=float(student_xyz[0, 0]),
+                                y=float(student_xyz[0, 1]),
+                                z=float(student_xyz[0, 2]),
+                            ),
+                            quat=Quaternion(
+                                w=float(student_quat[0, 0]),
+                                x=float(student_quat[0, 1]),
+                                y=float(student_quat[0, 2]),
+                                z=float(student_quat[0, 3]),
+                            ),
+                        )
+                        exp_xyz, _, _ = build_policy_output_trajectory(
+                            ego_pose_now=ego_pose_now,
+                            future_xyz_ego=future_xyz_ego,
+                            future_rot_ego=future_rot_ego,
+                            future_dt_us=future_dt_us,
+                        )
+                        ade = torch.norm(
+                            student_xyz[1:] - exp_xyz[1:], dim=-1,
+                        ).mean().item()
+                        fde = torch.norm(
+                            student_xyz[-1] - exp_xyz[-1],
+                        ).item()
+                        output.replay_data.payload["ade"] = ade
+                        output.replay_data.payload["fde"] = fde
+                        session.ade_list.append(ade)
+                        session.fde_list.append(fde)
+
+        expert_labels = sum(
+            1 for x in self._session_records[session_uuid].outputs
+            if x.replay_data is not None
+            and x.replay_data.payload.get("expert_action_tokens") is not None
+        ) if session_uuid in self._session_records else 0
+        n_ade = len(session.ade_list)
+        if n_ade > 0:
+            import statistics as _stats
+            logger.info(
+                "Expert collection done session=%s expert_labels=%d "
+                "ade_mean=%.3f fde_mean=%.3f (n=%d)",
+                session_uuid, expert_labels,
+                _stats.mean(session.ade_list),
+                _stats.mean(session.fde_list),
+                n_ade,
+            )
+        else:
+            logger.info(
+                "Expert collection done session=%s expert_labels=%d",
+                session_uuid, expert_labels,
+            )
+        session.expert_collector_done.set()
+
     def pop_session_record(self, session_uuid: str) -> SessionRecord:
-        """Remove and return the `SessionRecord` for `session_uuid`."""
+        """Remove and return the ``SessionRecord`` for ``session_uuid``.
+
+        Blocks until the background expert-future collector (if any) has
+        finished, so the rollout worker receives the fully-labeled record.
+        """
+        event = self._expert_collector_events.pop(session_uuid, None)
+        if event is not None:
+            event.wait(timeout=700)
         return self._session_records.pop(session_uuid)
 
     def get_version(self, request: Empty, context: grpc.ServicerContext) -> VersionId:

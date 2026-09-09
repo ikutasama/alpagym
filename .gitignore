@@ -28,3 +28,5 @@ tmp/
 
 .venv
 *.whl
+.venv_old/
+scripts/dagger/dagger_sft/

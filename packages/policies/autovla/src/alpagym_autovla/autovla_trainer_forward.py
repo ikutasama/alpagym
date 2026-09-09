@@ -20,7 +20,7 @@ from typing import Any
 
 import torch
 
-from alpagym_autovla.action_tokens import action_token_mask, ensure_action_token_layout
+from alpagym_autovla.action_tokens import action_token_mask, ensure_action_token_layout, sanitize_completion_vision_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -274,6 +274,10 @@ def _compute_action_logprobs(
         act_ids = action_token_ids.to(prompt_ids.dtype).to(prompt_ids.device)
         prompt_completion_ids = torch.cat([prompt_ids, act_ids.unsqueeze(0)], dim=1)
 
+    prompt_completion_ids = sanitize_completion_vision_tokens(
+        prompt_completion_ids, prompt_length, qwen_model.config,
+    )
+
     forward_kwargs = {
         k: v for k, v in model_inputs.items()
         if k not in ("input_ids", "attention_mask")
@@ -320,7 +324,7 @@ def _compute_action_logprobs_from_qwen_inputs(
     action_token_ids: torch.Tensor,
     completion_ids: torch.Tensor | None = None,
     teacher_model: Any | None = None,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
+) -> tuple[torch.Tensor, torch.Tensor | None, dict[str, Any] | None]:
     """Compute action log-probs using the exact Qwen inputs from rollout.
 
     Uses the persisted ``qwen_inputs`` (input_ids, pixel_values,
@@ -330,6 +334,10 @@ def _compute_action_logprobs_from_qwen_inputs(
     When ``teacher_model`` is provided, also computes per-sample KL
     divergence between the current and reference policy over the action
     tokens.
+
+    Returns ``(logprob, kl_div, aux)`` where ``aux`` is a dict with
+    ``completion_logits``, ``action_mask``, and ``prompt_length`` that
+    can be used to compute an SFT loss from the same forward pass.
     """
     prompt_ids = qwen_inputs["input_ids"]  # [1, prompt_len]
 
@@ -343,6 +351,10 @@ def _compute_action_logprobs_from_qwen_inputs(
         if act_ids.dim() == 1:
             act_ids = act_ids.unsqueeze(0)
         prompt_completion_ids = torch.cat([prompt_ids, act_ids], dim=1)
+
+    prompt_completion_ids = sanitize_completion_vision_tokens(
+        prompt_completion_ids, prompt_length, qwen_model.config,
+    )
 
     forward_kwargs = {
         k: v for k, v in qwen_inputs.items()
@@ -401,14 +413,20 @@ def _compute_action_logprobs_from_qwen_inputs(
                 kl_div = completion_logps.new_zeros(())
             kl_div = kl_div.squeeze() if kl_div.dim() > 0 else kl_div
 
-    return logprob_out, kl_div
+    completion_logits_out = logits[:, prompt_length - 1:, :]
+    aux = {
+        "completion_logits": completion_logits_out,
+        "action_mask": action_mask,
+        "prompt_length": prompt_length,
+    }
+    return logprob_out, kl_div, aux
 
 
 def autovla_training_forward(
     trainer: Any,
     model_inputs: dict[str, Any],
     teacher_model: Any | None = None,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
+) -> tuple[torch.Tensor, torch.Tensor | None, list[dict[str, Any] | None]]:
     """AutoVLA training forward: compute action log_probs using persisted Qwen inputs.
 
     When the rollout persisted its Qwen processor inputs (``qwen_inputs``),
@@ -420,8 +438,10 @@ def autovla_training_forward(
     divergence between the current and reference policy over the action
     tokens.
 
-    Returns ``(log_probs, kl_divs)`` where ``log_probs`` is ``[B]`` and
-    ``kl_divs`` is ``[B]`` or ``None``.
+    Returns ``(log_probs, kl_divs, aux_list)`` where ``log_probs`` is
+    ``[B]``, ``kl_divs`` is ``[B]`` or ``None``, and ``aux_list`` is a
+    per-sample list of dicts with completion logits and action mask for
+    SFT loss computation.
     """
     qwen_inputs_list = model_inputs.get("qwen_inputs")
     action_token_ids = model_inputs.get("action_token_ids")
@@ -464,6 +484,7 @@ def autovla_training_forward(
         )
         all_logprobs: list[torch.Tensor] = []
         all_kl_divs: list[torch.Tensor] = []
+        all_aux: list[dict[str, Any]] = []
         for b in range(batch_size):
             qwen_inputs = {
                 k: v.to(device) if isinstance(v, torch.Tensor) else v
@@ -477,21 +498,23 @@ def autovla_training_forward(
                 comp_ids = completion_ids
                 if comp_ids is not None and comp_ids.dim() == 1:
                     comp_ids = comp_ids.unsqueeze(0)
-                logprob, kl_div = _compute_action_logprobs_from_qwen_inputs(
+                logprob, kl_div, aux = _compute_action_logprobs_from_qwen_inputs(
                     qwen_model, qwen_inputs, prompt_length,
                     act_ids[b] if act_ids.dim() > 1 else act_ids[0],
                     comp_ids[b] if comp_ids is not None and comp_ids.dim() > 1 else comp_ids,
                     teacher_model=ref_qwen,
                 )
+                all_aux.append(aux)
             else:
                 logprob = torch.tensor(0.0, device=device)
                 kl_div = None
+                all_aux.append(None)
             all_logprobs.append(logprob)
             if kl_div is not None:
                 all_kl_divs.append(kl_div)
         log_probs = torch.stack(all_logprobs)
         kl_divs = torch.stack(all_kl_divs) if all_kl_divs else None
-        return log_probs, kl_divs
+        return log_probs, kl_divs, all_aux
 
     camera_frames = model_inputs["camera_frames"]
     ego_history_xyz = model_inputs["ego_history_xyz"]
@@ -538,7 +561,175 @@ def autovla_training_forward(
         all_logprobs.append(logprob)
 
     log_probs = torch.stack(all_logprobs)
-    return log_probs, None
+    return log_probs, None, []
+
+
+def _compute_expert_sft_loss(
+    trainer: Any,
+    model_inputs: dict[str, Any],
+    log_probs: torch.Tensor,
+) -> torch.Tensor | None:
+    """Compute SFT cross-entropy loss on expert action tokens (DAgger).
+
+    When ``expert_action_tokens`` is present in ``model_inputs``, this
+    computes the cross-entropy loss between the policy's action-token
+    logits and the expert's action-token labels, averaged over non-padding
+    rows.  Returns ``None`` when no expert tokens are available.
+    """
+    expert_tokens = model_inputs.get("expert_action_tokens")
+    if expert_tokens is None:
+        return None
+
+    qwen_model = _find_qwen_model(trainer.model)
+    device = next(qwen_model.parameters()).device
+    expert_tokens = expert_tokens.to(device)
+    if expert_tokens.dim() == 1:
+        expert_tokens = expert_tokens.unsqueeze(0)
+
+    qwen_inputs_list = model_inputs.get("qwen_inputs")
+    if qwen_inputs_list is None:
+        logger.warning("expert_action_tokens present but no qwen_inputs — skipping SFT loss")
+        return None
+
+    if isinstance(qwen_inputs_list, dict):
+        stacked_qi = qwen_inputs_list
+        first_tensor = next(
+            (v for v in stacked_qi.values() if isinstance(v, torch.Tensor)),
+            None,
+        )
+        batch_size = first_tensor.shape[0] if first_tensor is not None else 1
+        qwen_inputs_per_sample = []
+        for b in range(batch_size):
+            sample_qi: dict[str, Any] = {}
+            for k, v in stacked_qi.items():
+                if isinstance(v, torch.Tensor) and v.shape[0] == batch_size:
+                    sample_qi[k] = v[b]
+                elif isinstance(v, torch.Tensor):
+                    sample_qi[k] = v
+                else:
+                    sample_qi[k] = v
+            qwen_inputs_per_sample.append(sample_qi)
+    elif isinstance(qwen_inputs_list, list):
+        qwen_inputs_per_sample = qwen_inputs_list
+    else:
+        qwen_inputs_per_sample = [qwen_inputs_list]
+
+    batch_size = len(qwen_inputs_per_sample)
+    is_padding = model_inputs.get("is_padding")
+    if is_padding is not None:
+        is_padding = is_padding.to(device)
+    else:
+        is_padding = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+    action_start = _trainer_config.get("action_start_id", 151665)
+    action_count = _trainer_config.get("action_token_count", 2048)
+
+    total_loss = torch.tensor(0.0, device=device)
+    total_valid = 0
+
+    for b in range(batch_size):
+        if bool(is_padding[b].item()):
+            continue
+        if b >= expert_tokens.shape[0]:
+            break
+        qi = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+              for k, v in qwen_inputs_per_sample[b].items()}
+        prompt_length = int(qi.pop("prompt_length"))
+
+        expert_ids = expert_tokens[b].to(device)
+        prompt_ids = qi["input_ids"]
+        prompt_expert_ids = torch.cat([prompt_ids, expert_ids.unsqueeze(0)], dim=1)
+
+        forward_kwargs = {
+            k: v for k, v in qi.items()
+            if k not in ("input_ids", "attention_mask", "prompt_length")
+        }
+        outputs = qwen_model(
+            input_ids=prompt_expert_ids,
+            attention_mask=torch.ones_like(prompt_expert_ids),
+            use_cache=False,
+            **forward_kwargs,
+        )
+        logits = outputs.logits[:, :-1, :]  # [1, L-1, V]
+        target_ids = prompt_expert_ids[:, 1:].to(logits.device)
+
+        completion_part_ids = target_ids[:, prompt_length - 1:]
+        completion_logits = logits[:, prompt_length - 1:, :]
+
+        action_ids = _get_action_token_ids(completion_part_ids.device)
+        action_mask = action_token_mask(completion_part_ids, action_ids)
+
+        if action_mask.any():
+            masked_logits = completion_logits[action_mask.unsqueeze(-1).expand_as(completion_logits)]
+            masked_logits = masked_logits.view(-1, completion_logits.shape[-1])
+            masked_targets = completion_part_ids[action_mask]
+            loss = torch.nn.functional.cross_entropy(
+                masked_logits.float(), masked_targets,
+            )
+            total_loss = total_loss + loss
+            total_valid += 1
+
+        del outputs, logits, target_ids, prompt_expert_ids
+
+    if total_valid == 0:
+        return None
+
+    avg_loss = total_loss / total_valid
+    logger.info("DAgger SFT loss: %.4f (valid_samples=%d)", avg_loss.item(), total_valid)
+    return avg_loss
+
+
+def _compute_expert_sft_loss_from_aux(
+    model_inputs: dict[str, Any],
+    aux_list: list[dict[str, Any] | None],
+    expert_tokens: torch.Tensor | None,
+) -> torch.Tensor | None:
+    """Compute SFT cross-entropy loss from the main forward pass's logits.
+
+    Uses the ``completion_logits`` and ``action_mask`` from the GRPO
+    forward pass (passed via ``aux_list``) to compute the cross-entropy
+    loss with the expert's action tokens as targets.  This avoids a
+    second forward pass through the FSDP-wrapped model, which would
+    cause DTensor mixing errors during ``backward()``.
+    """
+    if expert_tokens is None:
+        return None
+    if aux_list is None or all(a is None for a in aux_list):
+        return None
+
+    total_loss = None
+    total_valid = 0
+
+    for b, aux in enumerate(aux_list):
+        if aux is None:
+            continue
+        if b >= expert_tokens.shape[0]:
+            break
+
+        completion_logits = aux["completion_logits"]
+        action_mask = aux["action_mask"]
+
+        expert_ids = expert_tokens[b].to(completion_logits.device)
+        if expert_ids.dim() == 0:
+            expert_ids = expert_ids.unsqueeze(0)
+
+        n_expert = expert_ids.shape[0]
+        n_logits = completion_logits.shape[1]
+        n_loss = min(n_expert, n_logits)
+
+        loss_logits = completion_logits[0, :n_loss, :]
+        loss_targets = expert_ids[:n_loss]
+
+        loss = torch.nn.functional.cross_entropy(
+            loss_logits.float(), loss_targets,
+        )
+        total_loss = loss if total_loss is None else total_loss + loss
+        total_valid += 1
+
+    if total_valid == 0:
+        return None
+
+    return total_loss / total_valid
 
 
 def patch_trainer_forward() -> None:
@@ -558,22 +749,30 @@ def patch_trainer_forward() -> None:
     def patched_forward_with_reference(
         self,
         model_inputs: dict[str, Any],
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         # AutoVLA path: camera_frames or qwen_inputs present
         if isinstance(model_inputs, dict) and (
             "camera_frames" in model_inputs or "qwen_inputs" in model_inputs
         ):
-            return autovla_training_forward(
+            log_probs, kl_divs, aux_list = autovla_training_forward(
                 self, model_inputs,
                 teacher_model=self._reference_model,
             )
+            torch.cuda.empty_cache()
+            eat = model_inputs.get("expert_action_tokens")
+            sft_loss = _compute_expert_sft_loss_from_aux(
+                model_inputs, aux_list, eat,
+            )
+            if sft_loss is not None:
+                logger.info("DAgger SFT loss: %.4f", sft_loss.item())
+            return log_probs, kl_divs, sft_loss
         # Original path for all other policies
         forward_kwargs = to_device_recursive(model_inputs, self.device)
         if self._reference_model is not None:
             forward_kwargs["teacher_model"] = self._reference_model
         result = self.model(**forward_kwargs)
-        return result["log_probs"], result.get("kl_div")
+        return result["log_probs"], result.get("kl_div"), None
 
     patched_forward_with_reference._autovla_patch = True  # type: ignore[attr-defined]
     AlpagymGRPOTrainer._forward_with_reference = patched_forward_with_reference
-    logger.info("Patched AlpagymGRPOTrainer._forward_with_reference for AutoVLA")
+    logger.info("Patched AlpagymGRPOTrainer._forward_with_reference for AutoVLA + DAgger")

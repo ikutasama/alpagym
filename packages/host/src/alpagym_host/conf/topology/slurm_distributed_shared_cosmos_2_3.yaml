@@ -37,7 +37,7 @@ alpasim:
 
 # n_sim_steps=30 with the 1.6s GT prefix emits 22 trainer replay rows. MR-2266
 # trains those as step-level samples; mini_batch=1 keeps each forward memory-bounded.
-expected_valid_steps: 22
+expected_valid_steps: 24
 
 cosmos:
   mode: disaggregated

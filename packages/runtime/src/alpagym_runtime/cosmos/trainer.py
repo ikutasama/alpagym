@@ -173,6 +173,32 @@ class AlpagymGRPOTrainer(_grpo_trainer.GRPOTrainer):
         Returns:
             Dict of training metrics for Cosmos to log.
         """
+        # VRAM guard: log live/cached VRAM at step boundaries and release cached
+        # blocks so transient peaks don't accumulate across steps. If a step's
+        # LIVE allocation still creeps, the log line gives a per-step growth curve.
+        try:
+            import gc as _gc
+            if torch.cuda.is_available():
+                _alloc = torch.cuda.memory_allocated() / (1024**3)
+                _peak = torch.cuda.max_memory_allocated() / (1024**3)
+                logger.warning(
+                    "[VRAM-GUARD] step=%d allocated=%.2fGiB peak=%.2fGiB (before empty_cache)",
+                    current_step, _alloc, _peak,
+                )
+                if _alloc > 60.0:
+                    _obj_count = sum(1 for _o in _gc.get_objects() if isinstance(_o, torch.Tensor))
+                    logger.warning(
+                        "[VRAM-GUARD] high live VRAM: %d tensors tracked by gc",
+                        _obj_count,
+                    )
+                torch.cuda.empty_cache()
+                _alloc2 = torch.cuda.memory_allocated() / (1024**3)
+                logger.warning(
+                    "[VRAM-GUARD] step=%d after empty_cache allocated=%.2fGiB",
+                    current_step, _alloc2,
+                )
+        except Exception:  # never break training on the guard
+            pass
         logger.info(
             "AlpaGym trainer step start current_step=%d total_steps=%d received_rollouts=%d "
             "group_size=%d mini_batch=%d grpo_optimization_iterations=%d "
@@ -294,6 +320,16 @@ class AlpagymGRPOTrainer(_grpo_trainer.GRPOTrainer):
             )
             for step in step_samples:
                 is_padding = bool(step.training_signal.is_padding.item())
+                if not is_padding:
+                    olp = step.training_signal.old_logprobs
+                    if not torch.isfinite(olp).all():
+                        is_padding = True
+                        step.training_signal.is_padding.fill_(True)
+                        step.training_signal.old_logprobs.fill_(0.0)
+                        logger.warning(
+                            "Filtered non-finite old_logprobs in _prepare_training_data; "
+                            "marked as padding"
+                        )
                 advantages.append(0.0 if is_padding else float(rollout.advantage))
             samples.extend(step_samples)
         return samples, torch.tensor(advantages, dtype=torch.float32)
@@ -400,7 +436,9 @@ class AlpagymGRPOTrainer(_grpo_trainer.GRPOTrainer):
         is_padding = minibatch.training_signal.is_padding.to(self.device)
         old_logprobs = minibatch.training_signal.old_logprobs.to(self.device)
         advantages = minibatch_advantages.to(device=self.device, dtype=torch.float32)
-        new_logprobs, kl_div = self._forward_with_reference(minibatch.model_inputs)
+        forward_inputs = dict(minibatch.model_inputs)
+        forward_inputs["is_padding"] = is_padding
+        new_logprobs, kl_div, sft_loss = self._forward_with_reference(forward_inputs)
         assert_replay_shapes(new_logprobs, old_logprobs, advantages, kl_div)
         policy_loss, ratio = compute_ppo_surrogate(
             new_logprobs,
@@ -417,6 +455,9 @@ class AlpagymGRPOTrainer(_grpo_trainer.GRPOTrainer):
             device=self.device,
         )
         loss = policy_loss + kl_loss
+        if sft_loss is not None:
+            dagger_beta = float(os.environ.get("ALPAGYM_DAGGER_BETA", "0.5"))
+            loss = loss + dagger_beta * sft_loss
 
         self.optimizers.zero_grad()
         # Free fragmented CUDA memory before backward. In colocated mode the
@@ -441,19 +482,21 @@ class AlpagymGRPOTrainer(_grpo_trainer.GRPOTrainer):
         # Without this, new_logprobs/loss/ratio keep autograd graph
         # references alive, preventing CUDA from reusing that memory.
         del new_logprobs, kl_div, loss, policy_loss, ratio
+        if sft_loss is not None:
+            del sft_loss
         torch.cuda.empty_cache()
         return metrics
 
     def _forward_with_reference(
         self,
         model_inputs: dict[str, Any],
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """Run the model forward with the reference model attached for KL."""
         forward_kwargs = to_device_recursive(model_inputs, self.device)
         if self._reference_model is not None:
             forward_kwargs["teacher_model"] = self._reference_model
         result = self.model(**forward_kwargs)
-        return result["log_probs"], result.get("kl_div")
+        return result["log_probs"], result.get("kl_div"), None
 
     def _minibatch_metrics(
         self,

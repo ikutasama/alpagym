@@ -1,0 +1,33 @@
+# 4-GPU disaggregated GRPO RL: 3 policy replicas + 1 rollout replica.
+# Stage 2: After DAgger SFT converges, switch to GRPO RL.
+# n_generation=4 → 4 rollouts per scene for group-relative advantage.
+# Geometry: rollout_batch(3) x n_gen(4) x rollout_replicas(1) = 12
+#         = policy_replicas(3) x train_batch_per_replica(4)
+#
+# DAgger mixing reduced to 0.2 (student explores freely most of the time).
+# SFT auxiliary loss reduced to 0.1 (weak regularizer).
+# KL penalty enabled for policy stabilization.
+name: autovla_a100_4gpu_grpo
+cuda_visible_devices: "3,4,5,6"
+mode: disaggregated
+transport: disk
+dp_shard_size: 1
+alpasim_topology: 1gpu
+
+policy_replicas: 3
+rollout_replicas: 1
+
+n_generation: 4
+rollout_batch_size: 3
+train_batch_per_replica: 4
+mini_batch: 1
+max_inference_batch_size: 3
+
+max_num_steps: 916
+num_epochs: 3
+learning_rate: 1.0e-6
+warmup_steps: 20
+ratio_clip: 0.1
+allowed_outdated_steps: 1
+save_freq: 30
+grad_norm_clip: 1.0

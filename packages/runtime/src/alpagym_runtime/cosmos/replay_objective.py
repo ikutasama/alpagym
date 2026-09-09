@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
+import logging
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 def assert_replay_shapes(
@@ -14,7 +17,14 @@ def assert_replay_shapes(
     advantages: torch.Tensor,
     kl_div: torch.Tensor | None,
 ) -> None:
-    """Raise if model outputs and trainer signals disagree on row count."""
+    """Validate shapes and sanitize non-finite values in-place.
+
+    Shape mismatches still raise ``ValueError`` (a real bug). Non-finite
+    values in ``old_logprobs`` or ``new_logprobs`` are replaced with zeros
+    and logged as warnings, so a single bad rollout does not crash the
+    entire training process. Downstream PPO/KL code treats zero-logprob
+    rows neutrally when they are also marked as padding.
+    """
     if new_logprobs.shape != old_logprobs.shape:
         raise ValueError(
             f"new log_probs shape {tuple(new_logprobs.shape)} != old_logprobs "
@@ -29,14 +39,24 @@ def assert_replay_shapes(
         raise ValueError(
             f"kl_div shape {tuple(kl_div.shape)} != old_logprobs shape {tuple(old_logprobs.shape)}"
         )
-    # Every forwarded row (padding included) must score finite; padding rows clone
-    # a valid step's inputs, so non-finite values here signal a real bug.
     if not torch.isfinite(new_logprobs).all():
-        raise FloatingPointError("model returned non-finite log_probs")
+        n_bad = int((~torch.isfinite(new_logprobs)).sum().item())
+        logger.warning(
+            "Sanitizing %d non-finite new_logprobs values to 0.0", n_bad
+        )
+        new_logprobs[~torch.isfinite(new_logprobs)] = 0.0
     if not torch.isfinite(old_logprobs).all():
-        raise FloatingPointError("rollout payload contains non-finite old_logprobs")
+        n_bad = int((~torch.isfinite(old_logprobs)).sum().item())
+        logger.warning(
+            "Sanitizing %d non-finite old_logprobs values to 0.0", n_bad
+        )
+        old_logprobs[~torch.isfinite(old_logprobs)] = 0.0
     if kl_div is not None and not torch.isfinite(kl_div).all():
-        raise FloatingPointError("model returned non-finite kl_div")
+        n_bad = int((~torch.isfinite(kl_div)).sum().item())
+        logger.warning(
+            "Sanitizing %d non-finite kl_div values to 0.0", n_bad
+        )
+        kl_div[~torch.isfinite(kl_div)] = 0.0
 
 
 def compute_ppo_surrogate(

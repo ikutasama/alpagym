@@ -20,7 +20,7 @@ from typing import Any, Mapping
 import torch
 from PIL import Image
 
-from alpagym_autovla.action_tokens import action_token_mask, ensure_action_token_layout
+from alpagym_autovla.action_tokens import action_token_mask, ensure_action_token_layout, sanitize_completion_vision_tokens
 from alpagym_host.config import SamplingParamsConfig
 from alpagym_runtime.inference.types import (
     BatchedModelInput,
@@ -190,7 +190,7 @@ class AutoVLAInferenceModel:
         # group diversity, low enough to keep trajectories coherent.
         gen_kwargs = {
             "do_sample": True,
-            "max_new_tokens": 80,
+            "max_new_tokens": 40,
             "temperature": sampling.temperature if sampling.temperature else 0.5,
             "top_k": sampling.top_k if sampling.top_k else 0,
             "top_p": sampling.top_p if sampling.top_p else 1.0,
@@ -304,7 +304,36 @@ class AutoVLAInferenceModel:
         action_token_ids_out = None
         completion_ids_out = None
         qwen_inputs_out = None
-        if return_trace_for_rl:
+
+        # Skip logprob for abnormal completions (length runaway, no action tokens)
+        expected_max_completion = 40
+        completion_too_long = completion_ids.shape[1] > expected_max_completion
+        has_action_tokens = raw_action_tokens.numel() > 0
+
+        if return_trace_for_rl and (completion_too_long or not has_action_tokens):
+            if completion_too_long:
+                logger.warning(
+                    "AutoVLA completion length %d exceeds max %d; "
+                    "marking rollout as invalid (NaN logprob)",
+                    completion_ids.shape[1],
+                    expected_max_completion,
+                )
+            else:
+                logger.warning(
+                    "AutoVLA generated 0 action tokens from completion_len=%d; "
+                    "marking rollout as invalid (NaN logprob)",
+                    completion_ids.shape[1],
+                )
+            logprob = torch.tensor([[float('nan')]])
+            action_token_ids_out = action_tokens.reshape(1, 1, -1).to(torch.int64).cpu()
+            completion_ids_out = completion_ids[0].cpu()
+            qwen_inputs_out = None
+            try:
+                del model_inputs, prompt_completion_ids
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+        elif return_trace_for_rl:
             try:
                 logprob = self._compute_logprob(
                     model_inputs, prompt_completion_ids, prompt_length
@@ -318,8 +347,8 @@ class AutoVLAInferenceModel:
                 }
                 qwen_inputs_out["prompt_length"] = prompt_length
             except Exception as exc:
-                logger.warning("Logprob computation failed, skipping: %s", exc)
-                logprob = torch.zeros(1, 1)
+                logger.warning("Logprob computation failed, marking rollout invalid: %s", exc)
+                logprob = torch.tensor([[float('nan')]])
                 action_token_ids_out = None
                 completion_ids_out = None
                 qwen_inputs_out = None
@@ -598,6 +627,9 @@ class AutoVLAInferenceModel:
         """
         vocab_size = self._vlm.config.vocab_size
         prompt_completion_ids = prompt_completion_ids.clamp(0, vocab_size - 1)
+        prompt_completion_ids = sanitize_completion_vision_tokens(
+            prompt_completion_ids, prompt_length, self._vlm.config,
+        )
         with torch.no_grad():
             forward_kwargs = {
                 key: value
@@ -749,6 +781,21 @@ class AutoVLAInferenceModel:
         }
         if "completion_ids" in payload:
             model_inputs["completion_ids"] = torch.as_tensor(payload["completion_ids"], dtype=torch.int64)
+        if "expert_action_tokens" in payload and payload["expert_action_tokens"] is not None:
+            model_inputs["expert_action_tokens"] = torch.as_tensor(
+                payload["expert_action_tokens"], dtype=torch.int64,
+            )
+        else:
+            model_inputs["expert_action_tokens"] = None
+        import logging as _logging
+        _logging.getLogger("alpagym_autovla.inference_model").info(
+            "DAgger debug build_model_inputs: expert_action_tokens in payload=%s, "
+            "is None=%s, set to=%s, payload keys=%s",
+            "expert_action_tokens" in payload,
+            payload.get("expert_action_tokens") is None,
+            type(model_inputs["expert_action_tokens"]).__name__,
+            list(payload.keys()),
+        )
         if "qwen_inputs" in payload:
             raw_qi = payload["qwen_inputs"]
             qwen_inputs_rehydrated: dict[str, Any] = {}

@@ -28,7 +28,10 @@ def resolve_alpasim_checkout(config: AlpaSimConfig) -> Path:
             raise NotADirectoryError(checkout_root)
         logging.info("Using local AlpaSim checkout %s", checkout_root)
         _validate_alpasim_layout(checkout_root)
-        _sync_alpasim_env(checkout_root, relocatable=False)
+        if os.environ.get("ALPAGYM_SKIP_ALPASIM_SYNC") != "1":
+            _sync_alpasim_env(checkout_root, relocatable=False)
+        else:
+            logging.info("Skipping AlpaSim env sync (ALPAGYM_SKIP_ALPASIM_SYNC=1)")
         return checkout_root
 
     if config.repo_url is None or config.repo_ref is None:

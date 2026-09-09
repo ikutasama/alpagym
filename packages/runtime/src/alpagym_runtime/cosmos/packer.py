@@ -200,19 +200,46 @@ class AlpagymDataPacker(DataPacker):
             )
 
         step_samples: list[TrainerReplayData] = []
-        for replay_data in replay_rows:
+        bad_indices: list[int] = []
+        for idx, replay_data in enumerate(replay_rows):
             model_inputs, old_logprob = self._build_model_inputs(replay_data)
+            is_bad = not torch.isfinite(old_logprob).all()
+            if is_bad:
+                logger.warning(
+                    "Skipping non-finite old_logprob=%s from rollout; "
+                    "marking as padding",
+                    float(old_logprob.item()) if old_logprob.numel() == 1 else "tensor",
+                )
+                old_logprob = torch.zeros((), dtype=torch.float32)
+                pad_flag = torch.ones(1, dtype=torch.bool)
+                bad_indices.append(idx)
+            else:
+                pad_flag = torch.zeros(1, dtype=torch.bool)
             step_samples.append(
                 TrainerReplayData(
                     model_inputs=model_inputs,
                     training_signal=TrainingSignal(
                         old_logprobs=old_logprob.reshape(1).to(dtype=torch.float32),
-                        is_padding=torch.zeros(1, dtype=torch.bool),
+                        is_padding=pad_flag,
                     ),
                     rollout_id=episode.session_uuid,
                     weight_version=torch.zeros((), dtype=torch.int64),
                 )
             )
+
+        if bad_indices:
+            good_idx = next(
+                (i for i in range(len(step_samples)) if i not in bad_indices), None
+            )
+            if good_idx is not None:
+                template = step_samples[good_idx].model_inputs
+                for bi in bad_indices:
+                    step_samples[bi] = TrainerReplayData(
+                        model_inputs=clone_model_inputs(template),
+                        training_signal=step_samples[bi].training_signal,
+                        rollout_id=step_samples[bi].rollout_id,
+                        weight_version=step_samples[bi].weight_version,
+                    )
 
         # Validate model-input key consistency at unpack so a malformed rollout
         # fails deterministically here, not later when a shuffled minibatch

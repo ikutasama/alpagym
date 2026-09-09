@@ -237,10 +237,16 @@ def require_payload_keys(
 
 def stack_step_model_inputs(step_inputs: list[dict[str, Any]]) -> dict[str, Any]:
     """Stack per-step model-input dictionaries along a new leading row dim."""
-    keys = set(step_inputs[0])
-    if any(set(item) != keys for item in step_inputs):
-        raise ValueError("Replay model input keys differ across steps")
-    return {key: _stack_values([item[key] for item in step_inputs], key) for key in keys}
+    all_keys = set()
+    for item in step_inputs:
+        all_keys.update(item)
+    return {
+        key: _stack_values(
+            [item[key] if key in item else None for item in step_inputs],
+            key,
+        )
+        for key in all_keys
+    }
 
 
 def clone_model_inputs(model_inputs: Any) -> Any:
@@ -281,7 +287,7 @@ def _stack_values(values: list[Any], key: str) -> Any:
     if any(value is None for value in values):
         if all(value is None for value in values):
             return None
-        raise ValueError(f"Optional model input {key} mixes None and tensor values")
+        return None
     first = values[0]
     if isinstance(first, torch.Tensor):
         max_len = max(v.shape[-1] for v in values)

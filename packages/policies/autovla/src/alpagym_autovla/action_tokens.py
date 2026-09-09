@@ -81,6 +81,45 @@ def action_token_mask(token_ids: torch.Tensor, action_token_ids: torch.Tensor) -
     return torch.isin(token_ids, action_token_ids)
 
 
+_QWEN_VISION_TOKEN_ATTRS = (
+    "image_token_id",
+    "video_token_id",
+    "vision_start_token_id",
+    "vision_end_token_id",
+)
+
+
+def sanitize_completion_vision_tokens(
+    prompt_completion_ids: torch.Tensor,
+    prompt_length: int,
+    vlm_config: Any,
+) -> torch.Tensor:
+    """Replace Qwen2.5-VL vision-placeholder tokens in the completion part.
+
+    During generation the model may emit vision-related token ids
+    (``image_token_id``, ``video_token_id``, ``vision_start_token_id``,
+    ``vision_end_token_id``) in the completion.  A subsequent full forward
+    pass causes ``get_rope_index`` to treat these as additional images/videos
+    and index into ``image_grid_thw`` / ``video_grid_thw`` out of bounds,
+    triggering a CUDA device-side assert that kills the process.
+
+    Tokens at positions < ``prompt_length`` (the prompt) are left untouched;
+    only completion positions are sanitized by replacing vision tokens with 0.
+    """
+    vision_ids: list[int] = []
+    for attr in _QWEN_VISION_TOKEN_ATTRS:
+        tid = getattr(vlm_config, attr, None)
+        if tid is not None:
+            vision_ids.append(int(tid))
+    if not vision_ids:
+        return prompt_completion_ids
+    ids = prompt_completion_ids.clone()
+    comp = ids[:, prompt_length:]
+    for tid in vision_ids:
+        comp[comp == tid] = 0
+    return ids
+
+
 def _token_to_id(tokenizer: Any, token: str) -> int | None:
     """Return one token id, treating unknown-token aliases as missing."""
     token_id = None

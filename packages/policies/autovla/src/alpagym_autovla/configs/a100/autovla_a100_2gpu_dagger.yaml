@@ -1,0 +1,29 @@
+# DAgger SFT: policy on GPU 0, rollout on GPU 1. Disaggregated mode gives
+# the training GPU full 80GB VRAM, so FSDP CPU offload and gradient
+# checkpointing are disabled—training drops from ~37 min to ~1-2 min/step.
+# The rollout GPU shares with the expert service (~22GB), so vLLM uses
+# gpu_memory_utilization=0.5 (~40GB, plenty for 3B model + KV cache).
+name: autovla_a100_2gpu_dagger
+cuda_visible_devices: "3,4"
+mode: disaggregated
+transport: disk
+dp_shard_size: 1
+alpasim_topology: 1gpu
+
+policy_replicas: 1
+rollout_replicas: 1
+
+n_generation: 1
+rollout_batch_size: 1
+train_batch_per_replica: 1
+mini_batch: 1
+max_inference_batch_size: 1
+
+max_num_steps: 916
+num_epochs: 3
+learning_rate: 1.0e-6
+warmup_steps: 20
+ratio_clip: 0.1
+allowed_outdated_steps: 1
+save_freq: 30
+grad_norm_clip: 1.0

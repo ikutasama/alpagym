@@ -1,0 +1,39 @@
+# 5-GPU disaggregated DAgger: 4 policy replicas + 1 rollout replica.
+# GPU 2: expert service (Alpamayo, ~22GB, outside launcher)
+# GPU 3-6: 4 policy replicas (each ~59GB, full 80GB available)
+# GPU 7: rollout (vLLM, batch=4, gpu_memory_utilization=0.5)
+#
+# The 5090's 1gpu topology supports 4 concurrent sim sessions. With
+# rollout_batch_size=4 and max_inference_batch_size=4, the rollout GPU
+# runs 4 episodes in parallel, batching their drive() calls into single
+# forward passes. 4 policy replicas train the 4 episodes in parallel,
+# so training time stays ~1 min (same as 2gpu_dagger).
+#
+# Geometry: rollout_batch(4) x n_gen(1) x rollout_replicas(1) = 4
+#         = policy_replicas(4) x train_batch_per_replica(1)
+#
+# Expected: ~5 min/step for 4 episodes = ~1.25 min/episode (4.3x vs 2gpu_dagger)
+name: autovla_a100_5gpu_dagger
+cuda_visible_devices: "3,4,5,6,7"
+mode: disaggregated
+transport: disk
+dp_shard_size: 1
+alpasim_topology: 1gpu
+
+policy_replicas: 4
+rollout_replicas: 1
+
+n_generation: 1
+rollout_batch_size: 4
+train_batch_per_replica: 1
+mini_batch: 1
+max_inference_batch_size: 4
+
+max_num_steps: 916
+num_epochs: 3
+learning_rate: 1.0e-6
+warmup_steps: 20
+ratio_clip: 0.1
+allowed_outdated_steps: 1
+save_freq: 30
+grad_norm_clip: 1.0
