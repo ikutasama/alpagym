@@ -30,3 +30,5 @@ tmp/
 *.whl
 .venv_old/
 scripts/dagger/dagger_sft/
+scripts/dagger/runs/
+scripts/dagger/dagger_sft/

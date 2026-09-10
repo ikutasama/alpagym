@@ -246,7 +246,14 @@ class EgodriverGrpcServicer:
             logger.warning("CUDA error in drive() step %d: %s; clearing cache", step_index, oom_exc)
             torch.cuda.empty_cache()
             context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, f"CUDA error in policy step: {oom_exc}")
-        session.record_step(policy_input, policy_output)
+
+        # BUG-3 fix (2026-09-10): record_step was previously called here,
+        # BEFORE the expert-takeover block below.  When the expert replaces
+        # the student's trajectory, session.outputs would still hold the
+        # student's policy_output — causing reward misattribution (student's
+        # tokens recorded, expert's trajectory executed).  Now record_step
+        # is deferred to after the expert block so the recorded output
+        # matches the actually-executed trajectory.
 
         if _EXPERT_ENABLED and _expert_client is not None:
             try:
@@ -310,15 +317,48 @@ class EgodriverGrpcServicer:
 
                                 if use_expert:
                                     from dataclasses import replace as _replace
+                                    # BUG-3 fix (2026-09-10): Expert is driving
+                                    # the simulation.  record_step has been
+                                    # deferred to after this block, so
+                                    # session.outputs will record the expert's
+                                    # trajectory (correct reward attribution).
+                                    #
+                                    # Additionally, set old_logprob to NaN and
+                                    # replace action_token_ids with the expert's
+                                    # tokens in the replay payload.  This makes
+                                    # GRPO mark the step as invalid (is_padding)
+                                    # and exclude it from the policy gradient —
+                                    # the student's logprob for its own
+                                    # (unexecuted) tokens is meaningless under
+                                    # the expert's trajectory.  The
+                                    # expert_action_tokens set above ensure
+                                    # DAgger SFT loss still teaches the student
+                                    # on this step.
+                                    new_replay_data = rd
+                                    if rd is not None:
+                                        new_payload = dict(rd.payload)
+                                        new_payload["action_token_ids"] = action_tokens.cpu()
+                                        nan_logprob = _torch.tensor(
+                                            float('nan'),
+                                            dtype=rd.old_logprob.dtype
+                                            if rd.old_logprob is not None
+                                            else _torch.float32,
+                                        )
+                                        new_replay_data = _replace(
+                                            rd,
+                                            old_logprob=nan_logprob,
+                                            payload=new_payload,
+                                        )
                                     policy_output = _replace(
                                         policy_output,
                                         chosen_xyz=exp_xyz,
                                         chosen_quat=exp_quat,
                                         chosen_dt_us=exp_dt,
+                                        replay_data=new_replay_data,
                                     )
                                     logger.info(
                                         "  step %d EXPERT drives (beta=%.2f) tokens=%s "
-                                        "ade=%.3f fde=%.3f (%.1fs)",
+                                        "ade=%.3f fde=%.3f (%.1fs) [reward invalidated]",
                                         step_index, _DAGGER_MIX_BETA, action_tokens.tolist(),
                                         ade, fde, result.get("elapsed", 0),
                                     )
@@ -350,6 +390,10 @@ class EgodriverGrpcServicer:
             except Exception as e:
                 logger.warning("Expert async_query failed at step %d: %s", step_index, e)
                 session.expert_futures.append(None)
+
+        # BUG-3 fix: record_step deferred to here (after expert block) so the
+        # recorded output matches the actually-executed trajectory.
+        session.record_step(policy_input, policy_output)
 
         return drive_response_from_policy_output(policy_input, policy_output)
 

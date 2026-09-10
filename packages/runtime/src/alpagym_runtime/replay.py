@@ -283,10 +283,33 @@ def _dataclass_to_plain(value: Any) -> Any:
 
 
 def _stack_values(values: list[Any], key: str) -> Any:
-    """Stack one nested field across steps."""
+    """Stack one nested field across steps.
+
+    BUG-2 fix (2026-09-10): When *some* values are None and others are not
+    (mixed batch — e.g. one step has expert tokens, another doesn't), we
+    previously returned None for the entire field, silently disabling the
+    DAgger SFT loss for the whole batch.  Now we keep the non-None values
+    and replace None entries with a zero-filled placeholder of the same
+    shape, so downstream code can use ``is_padding`` or per-row None checks
+    to skip the missing rows instead of losing the entire batch.
+    """
     if any(value is None for value in values):
         if all(value is None for value in values):
             return None
+        # Mixed None / non-None: fill None slots with a zero placeholder
+        # matching the shape of the first non-None value.  Downstream code
+        # (e.g. _compute_expert_sft_loss_from_aux) uses is_padding to skip
+        # these rows rather than silently dropping the whole batch.
+        non_none = next((v for v in values if v is not None), None)
+        if isinstance(non_none, torch.Tensor):
+            filled = []
+            for v in values:
+                if v is None:
+                    filled.append(torch.zeros_like(non_none))
+                else:
+                    filled.append(v)
+            return torch.stack(filled, dim=0)
+        # For non-tensor mixed-None, fall through to None (can't safely fill)
         return None
     first = values[0]
     if isinstance(first, torch.Tensor):

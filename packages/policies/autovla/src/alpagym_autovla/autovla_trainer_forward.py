@@ -691,11 +691,32 @@ def _compute_expert_sft_loss_from_aux(
     loss with the expert's action tokens as targets.  This avoids a
     second forward pass through the FSDP-wrapped model, which would
     cause DTensor mixing errors during ``backward()``.
+
+    BUG-1 fix (2026-09-10): Previously took ``completion_logits[0, :n_loss]``
+    — the first N positions of the completion — as the logits to fit expert
+    action tokens.  But the completion starts with a text prefix
+    (``<answer>\\nThe final output action is: …``) before the action tokens
+    appear, so the CE was aligning "prefix logits" with "expert action tokens"
+    — actively teaching the model to emit action tokens at the wrong positions.
+    Now uses ``action_mask`` to select only the action-token positions.
     """
     if expert_tokens is None:
+        logger.debug(
+            "DAgger SFT loss skipped: expert_action_tokens is None "
+            "(expert query failed, fallback payload, or beta=0 sampling)"
+        )
         return None
     if aux_list is None or all(a is None for a in aux_list):
         return None
+
+    # BUG-2 fix: respect is_padding — but only skip rows that are padding AND
+    # have no expert tokens.  Expert-takeover steps (BUG-3 fix) have their
+    # old_logprob set to NaN, which causes _prepare_training_data to mark them
+    # is_padding=True for GRPO exclusion.  However, these steps DO have
+    # expert_action_tokens and SHOULD contribute to the DAgger SFT loss — that's
+    # the whole point of DAgger: learn from states where the expert intervened.
+    is_padding = model_inputs.get("is_padding")
+    batch_size = len(aux_list)
 
     total_loss = None
     total_valid = 0
@@ -706,19 +727,50 @@ def _compute_expert_sft_loss_from_aux(
         if b >= expert_tokens.shape[0]:
             break
 
-        completion_logits = aux["completion_logits"]
-        action_mask = aux["action_mask"]
+        # Skip padding rows ONLY if they have no expert tokens (true padding =
+        # cloned template with no expert labels).  Expert-takeover rows are
+        # is_padding=True (for GRPO) but have expert tokens (for DAgger SFT).
+        if is_padding is not None:
+            pad_b = is_padding[b] if b < len(is_padding) else False
+            if isinstance(pad_b, torch.Tensor):
+                pad_b = pad_b.item()
+            if bool(pad_b):
+                # Check if this row has valid expert tokens — if so, it's an
+                # expert-takeover step that should still get SFT loss.
+                expert_b = expert_tokens[b]
+                if expert_b is not None and expert_b.numel() > 0:
+                    has_real_tokens = bool((expert_b != 0).any().item())
+                    if not has_real_tokens:
+                        continue  # true padding, skip
+                    # expert-takeover step: fall through to compute SFT loss
+                else:
+                    continue  # no expert tokens, skip
+
+        completion_logits = aux["completion_logits"]   # [1, T, V]
+        action_mask = aux["action_mask"]               # [1, T] bool
 
         expert_ids = expert_tokens[b].to(completion_logits.device)
         if expert_ids.dim() == 0:
             expert_ids = expert_ids.unsqueeze(0)
 
+        # BUG-1 fix: use action_mask to find action-token positions, not the
+        # first N positions.  action_mask marks True wherever the completion
+        # token id falls in the action-token codebook range.
+        masked_positions = action_mask[0]  # [T] bool
+        n_action = int(masked_positions.sum().item())
         n_expert = expert_ids.shape[0]
-        n_logits = completion_logits.shape[1]
-        n_loss = min(n_expert, n_logits)
 
-        loss_logits = completion_logits[0, :n_loss, :]
-        loss_targets = expert_ids[:n_loss]
+        if n_action == 0:
+            logger.warning(
+                "DAgger SFT loss: sample %d has 0 action tokens in completion, skipping", b
+            )
+            continue
+
+        n_loss = min(n_expert, n_action)
+
+        # Select logits at action-token positions only
+        loss_logits = completion_logits[0][masked_positions][:n_loss]  # [n_loss, V]
+        loss_targets = expert_ids[:n_loss]                              # [n_loss]
 
         loss = torch.nn.functional.cross_entropy(
             loss_logits.float(), loss_targets,
@@ -727,6 +779,9 @@ def _compute_expert_sft_loss_from_aux(
         total_valid += 1
 
     if total_valid == 0:
+        logger.warning(
+            "DAgger SFT loss: 0 valid samples after filtering (batch_size=%d)", batch_size
+        )
         return None
 
     return total_loss / total_valid
