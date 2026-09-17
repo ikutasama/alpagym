@@ -236,8 +236,10 @@ class QwenDriveInferenceModel:
         route_xy = model_input.route_xy[batch_idx]  # [N, 2]
         nav_command = route_to_nav_command(route_xy)
 
-        # 4. Build driving command (one-hot: [straight, left, right])
-        driving_command = np.zeros(3, dtype=np.float32)
+        # 4. Build driving command (one-hot: 4 classes 鈥?[straight, left, right, unknown])
+        # Qwen-Drive's PlanningExpert expects ego_status_dim=8:
+        # velocity[2] + acceleration[2] + driving_command[4] = 8
+        driving_command = np.zeros(4, dtype=np.float32)
         driving_command[nav_command] = 1.0
 
         # 5. Build DrivingScene
