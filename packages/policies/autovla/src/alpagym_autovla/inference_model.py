@@ -22,6 +22,7 @@ from PIL import Image
 
 from alpagym_autovla.action_tokens import action_token_mask, ensure_action_token_layout, sanitize_completion_vision_tokens
 from alpagym_host.config import SamplingParamsConfig
+from transformers import LogitsProcessor
 from alpagym_runtime.inference.types import (
     BatchedModelInput,
     BatchedModelOutput,
@@ -48,6 +49,22 @@ def heading_to_rotation_matrix(heading: torch.Tensor) -> torch.Tensor:
     rot[..., 1, 1] = cos
     rot[..., 2, 2] = 1.0
     return rot
+
+
+
+
+class _NanInfClampLogitsProcessor(LogitsProcessor):
+    """Clamp NaN/inf logits to prevent CUDA device-side assert in multinomial sampling.
+
+    When the model produces NaN or inf logits (e.g. from BF16 overflow or
+    numerical instability after weight sync), the multinomial sampler triggers
+    a CUDA assert that poisons the entire CUDA context.  This processor
+    replaces NaN with 0.0 and clamps inf to \pm1e4 so sampling continues
+    safely.
+    """
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        return torch.nan_to_num(scores, nan=0.0, posinf=1e4, neginf=-1e4)
 
 
 class AutoVLAInferenceModel:
@@ -223,10 +240,19 @@ class AutoVLAInferenceModel:
                         top5.indices.tolist(),
                         top5.values.tolist(),
                     )
-            prompt_completion_ids = self._vlm.generate(
+            # Use output_scores=True to capture per-token logits during generation.
+            # This avoids a separate forward pass (_compute_logprob) which fails
+            # with shape mismatch in Qwen2.5-VL's get_rope_index when the input
+            # includes completion tokens after vision tokens.
+            gen_output = self._vlm.generate(
                 **model_inputs,
                 **gen_kwargs,
+                output_scores=True,
+                return_dict_in_generate=True,
+                logits_processor=[_NanInfClampLogitsProcessor()],
             )
+            prompt_completion_ids = gen_output.sequences
+            _gen_scores = gen_output.scores  # tuple of (batch=1, vocab) per step
 
         prompt_length = model_inputs["input_ids"].size(1)
         completion_ids = prompt_completion_ids[:, prompt_length:]
@@ -303,7 +329,8 @@ class AutoVLAInferenceModel:
         logprob = None
         action_token_ids_out = None
         completion_ids_out = None
-        qwen_inputs_out = None
+        qwen_inputs_out = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in model_inputs.items() if k != 'prompt_length'}
+        qwen_inputs_out["prompt_length"] = prompt_length
 
         # Skip logprob for abnormal completions (length runaway, no action tokens)
         expected_max_completion = 40
@@ -324,10 +351,11 @@ class AutoVLAInferenceModel:
                     "marking rollout as invalid (NaN logprob)",
                     completion_ids.shape[1],
                 )
-            logprob = torch.tensor([[float('nan')]])
+            logprob = torch.tensor([[float('nan')]], device=self._device)
             action_token_ids_out = action_tokens.reshape(1, 1, -1).to(torch.int64).cpu()
             completion_ids_out = completion_ids[0].cpu()
-            qwen_inputs_out = None
+            qwen_inputs_out = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in model_inputs.items() if k != 'prompt_length'}
+            qwen_inputs_out["prompt_length"] = prompt_length
             try:
                 del model_inputs, prompt_completion_ids
                 torch.cuda.empty_cache()
@@ -335,9 +363,32 @@ class AutoVLAInferenceModel:
                 pass
         elif return_trace_for_rl:
             try:
-                logprob = self._compute_logprob(
-                    model_inputs, prompt_completion_ids, prompt_length
-                ).reshape(1, 1)
+                # Compute logprob from generate() scores instead of a separate
+                # forward pass. The scores are per-step logits (batch=1, vocab).
+                # We sum logprobs only for action token positions.
+                if _gen_scores is not None and completion_ids.shape[1] > 0:
+                    comp_ids = completion_ids[0]  # (comp_len,)
+                    # Build action mask for completion tokens
+                    act_mask = self._action_token_mask(comp_ids.unsqueeze(0)).squeeze(0)  # (comp_len,)
+                    # scores[i] corresponds to the logits for generating token i
+                    # (0-indexed from the first generated token)
+                    token_logps = []
+                    for i, tid in enumerate(comp_ids):
+                        if i < len(_gen_scores):
+                            step_logits = _gen_scores[i]  # (batch=1, vocab)
+                            step_logp = torch.log_softmax(step_logits.float(), dim=-1)
+                            token_logps.append(step_logp[0, int(tid.item())])
+                    if token_logps:
+                        all_logps = torch.stack(token_logps)  # (comp_len,)
+                        if act_mask.any():
+                            logprob = all_logps[act_mask].sum()
+                        else:
+                            logprob = all_logps.new_zeros(())
+                    else:
+                        logprob = torch.tensor(float('nan'), device=self._device)
+                else:
+                    logprob = torch.tensor(float('nan'), device=self._device)
+                logprob = logprob.reshape(1, 1)
                 action_token_ids_out = action_tokens.reshape(1, 1, -1).to(torch.int64).cpu()
                 completion_ids_out = completion_ids[0].cpu()
                 qwen_inputs_out = {
@@ -348,10 +399,11 @@ class AutoVLAInferenceModel:
                 qwen_inputs_out["prompt_length"] = prompt_length
             except Exception as exc:
                 logger.warning("Logprob computation failed, marking rollout invalid: %s", exc)
-                logprob = torch.tensor([[float('nan')]])
-                action_token_ids_out = None
-                completion_ids_out = None
-                qwen_inputs_out = None
+                logprob = torch.tensor([[float('nan')]], device=self._device)
+                action_token_ids_out = action_tokens.reshape(1, 1, -1).to(torch.int64).cpu()
+                completion_ids_out = completion_ids[0].cpu()
+                qwen_inputs_out = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in model_inputs.items() if k != 'prompt_length'}
+                qwen_inputs_out["prompt_length"] = prompt_length
             finally:
                 try:
                     del model_inputs, prompt_completion_ids
@@ -454,10 +506,29 @@ class AutoVLAInferenceModel:
         if self._use_cot:
             system_text = (
                 "You are an Advanced Driver Assistance and Full Self-Driving System. "
-                "You will be provided with video observations from the ego vehicle's "
-                "surrounding cameras, along with the vehicle's current dynamic states. "
-                "Your task is to predict the most appropriate driving action for the "
-                "next five seconds."
+                "You will receive visual observations from the ego vehicle's cameras "
+                "and dynamic information about the vehicle's current state. "
+                "Your task is to predict the optimal driving action for the next five seconds.\n\n"
+                "First, carefully analyze the surrounding environment by considering "
+                "traffic lights, the movements of other vehicles and pedestrians, lane "
+                "markings, and any other relevant factors.\n\n"
+                "If necessary, use step-by-step reasoning (Chain-of-Thought) to arrive at "
+                "the best driving action. Otherwise, you may directly predict the final "
+                "driving action.\n\n"
+                "Structure your reasoning as follows:\n"
+                "1. **Scene Analysis**: Describe the traffic situation, including relevant "
+                "environmental cues such as traffic lights, lane markings, and the behaviors "
+                "of surrounding vehicles or pedestrians.\n"
+                "2. **Identification of Critical Objects**: Identify two to three critical "
+                "road users or obstacles, specifying their relative positions to the ego vehicle.\n"
+                "3. **Prediction of Critical Object Behavior**: Predict the potential movements "
+                "of the identified critical objects.\n"
+                "4. **Ego Vehicle Intent Reasoning**: Based on the observed environment and "
+                "current vehicle state, reason about the desired intent of the ego vehicle.\n"
+                "5. **Final Action Decision**: Select one lateral action and one longitudinal action:\n"
+                "- **Lateral actions** (choose exactly one): [move forward, turn left, change lane to left, turn right, change lane to right]\n"
+                "- **Longitudinal actions** (choose exactly one): [stop, deceleration to zero, maintain constant speed, quick deceleration, deceleration, quick acceleration, acceleration]\n\n"
+                "Present the final action clearly after your reasoning steps."
             )
         else:
             system_text = (

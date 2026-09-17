@@ -15,6 +15,7 @@ the full Qwen view.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -345,11 +346,17 @@ def _compute_action_logprobs_from_qwen_inputs(
         comp_ids = completion_ids.to(prompt_ids.dtype).to(prompt_ids.device)
         if comp_ids.dim() == 1:
             comp_ids = comp_ids.unsqueeze(0)
+        # Fix 13: EOS append removed — it causes a shape mismatch in
+        # Qwen2.5-VL get_rope_index because vision inputs (pixel_values,
+        # image_grid_thw) are tied to the original input_ids length.
+        # Appending EOS makes input_ids 1 token longer than the vision
+        # inputs expect, crashing with IndexError.
         prompt_completion_ids = torch.cat([prompt_ids, comp_ids], dim=1)
     else:
         act_ids = action_token_ids.to(prompt_ids.dtype).to(prompt_ids.device)
         if act_ids.dim() == 1:
             act_ids = act_ids.unsqueeze(0)
+        # Fix 13: EOS append removed (same rationale as above).
         prompt_completion_ids = torch.cat([prompt_ids, act_ids], dim=1)
 
     prompt_completion_ids = sanitize_completion_vision_tokens(
@@ -360,6 +367,23 @@ def _compute_action_logprobs_from_qwen_inputs(
         k: v for k, v in qwen_inputs.items()
         if k not in ("input_ids", "attention_mask", "prompt_length")
     }
+    # Fix 16: Pad mm_token_type_ids and input_token_type to match prompt_completion_ids length.
+    # These tensors have length = prompt_length (vision token types), but
+    # prompt_completion_ids has length = prompt_length + completion_length.
+    # Pad with zeros (text/non-vision tokens) for the completion part.
+    _target_len = prompt_completion_ids.shape[-1]
+    for _tt_key in ("mm_token_type_ids", "input_token_type"):
+        if _tt_key in forward_kwargs:
+            _tt = forward_kwargs[_tt_key]
+            if hasattr(_tt, "shape") and len(_tt.shape) >= 1:
+                _curr_len = _tt.shape[-1]
+                if _curr_len < _target_len:
+                    _pad_len = _target_len - _curr_len
+                    _pad = torch.zeros(
+                        *_tt.shape[:-1], _pad_len,
+                        dtype=_tt.dtype, device=_tt.device,
+                    )
+                    forward_kwargs[_tt_key] = torch.cat([_tt, _pad], dim=-1)
     outputs = qwen_model(
         input_ids=prompt_completion_ids,
         attention_mask=torch.ones_like(prompt_completion_ids),
@@ -775,6 +799,27 @@ def _compute_expert_sft_loss_from_aux(
         loss = torch.nn.functional.cross_entropy(
             loss_logits.float(), loss_targets,
         )
+
+        # EOS loss: teach the model to predict EOS after the action tokens.
+        # The forward pass (_compute_action_logprobs_from_qwen_inputs)
+        # appends EOS to the completion, so the last logit position predicts
+        # EOS.  Without this term the model never learns when to stop
+        # generating and degenerates into emitting max_new_tokens every time.
+        # Controlled by ALPAGYM_DAGGER_EOS_BETA (default 1.0).
+        eos_weight = float(os.environ.get("ALPAGYM_DAGGER_EOS_BETA", "1.0"))
+        if eos_weight > 0.0 and not bool(masked_positions[-1].item()):
+            eos_id = _get_processor().tokenizer.eos_token_id
+            eos_logit = completion_logits[0, -1, :].unsqueeze(0)  # [1, V]
+            eos_target = torch.tensor([eos_id], device=eos_logit.device)
+            eos_loss = torch.nn.functional.cross_entropy(
+                eos_logit.float(), eos_target,
+            )
+            loss = loss + eos_weight * eos_loss
+            logger.debug(
+                "DAgger EOS loss: %.4f (weight=%.1f, sample=%d, eos_id=%d)",
+                eos_loss.item(), eos_weight, b, eos_id,
+            )
+
         total_loss = loss if total_loss is None else total_loss + loss
         total_valid += 1
 

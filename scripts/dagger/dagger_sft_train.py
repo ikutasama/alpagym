@@ -33,7 +33,7 @@ torch.set_float32_matmul_precision("high")
 DEFAULT_CONFIG = {
     "model": {
         "pretrained_model_path": "/data/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Qwen/Qwen2.5-VL-3B-Instruct",
-        "sft_model_path": "/tmp/model/AutoVLA/autovla_sft_warmup_step5000.ckpt",
+        "sft_model_path": "/data/mnt_m62/10_personal/z59900495/workspace/DownloadTool-master/Zewei-Zhou/AutoVLA/AutoVLA_PDMS_89.ckpt",
         "codebook_cache_path": "/data/mnt_m62/10_personal/z59900495/workspace/AutoVLA/codebook_cache/agent_vocab.pkl",
         "attn_implementation": "sdpa",
         "train_vision_backbone": False,
@@ -116,10 +116,29 @@ class DaggerSFTDataset(Dataset):
                 "type": "text",
                 "text": (
                     "You are an Advanced Driver Assistance and Full Self-Driving System. "
-                    "You will be provided with video observations from the ego vehicle's "
-                    "surrounding cameras, along with the vehicle's current dynamic states. "
-                    "Your task is to predict the most appropriate driving action for the "
-                    "next five seconds."
+                    "You will receive visual observations from the ego vehicle's cameras "
+                    "and dynamic information about the vehicle's current state. "
+                    "Your task is to predict the optimal driving action for the next five seconds.\n\n"
+                    "First, carefully analyze the surrounding environment by considering "
+                    "traffic lights, the movements of other vehicles and pedestrians, lane "
+                    "markings, and any other relevant factors.\n\n"
+                    "If necessary, use step-by-step reasoning (Chain-of-Thought) to arrive at "
+                    "the best driving action. Otherwise, you may directly predict the final "
+                    "driving action.\n\n"
+                    "Structure your reasoning as follows:\n"
+                    "1. **Scene Analysis**: Describe the traffic situation, including relevant "
+                    "environmental cues such as traffic lights, lane markings, and the behaviors "
+                    "of surrounding vehicles or pedestrians.\n"
+                    "2. **Identification of Critical Objects**: Identify two to three critical "
+                    "road users or obstacles, specifying their relative positions to the ego vehicle.\n"
+                    "3. **Prediction of Critical Object Behavior**: Predict the potential movements "
+                    "of the identified critical objects.\n"
+                    "4. **Ego Vehicle Intent Reasoning**: Based on the observed environment and "
+                    "current vehicle state, reason about the desired intent of the ego vehicle.\n"
+                    "5. **Final Action Decision**: Select one lateral action and one longitudinal action:\n"
+                    "- **Lateral actions** (choose exactly one): [move forward, turn left, change lane to left, turn right, change lane to right]\n"
+                    "- **Longitudinal actions** (choose exactly one): [stop, deceleration to zero, maintain constant speed, quick deceleration, deceleration, quick acceleration, acceleration]\n\n"
+                    "Present the final action clearly after your reasoning steps."
                 ),
             }
         ]
@@ -180,10 +199,47 @@ class DaggerSFTDataset(Dataset):
             },
         ]
 
+        # Generate template-based CoT reasoning text for DAgger SFT target.
+        # This teaches the model to produce structured reasoning before actions.
+        lat_action = instruction if instruction in (
+            "move forward", "turn left", "turn right",
+            "change lane to left", "change lane to right"
+        ) else "move forward"
+        if velocity < 0.5:
+            lon_action = "stop"
+        elif acceleration < -1.0:
+            lon_action = "quick deceleration"
+        elif acceleration < -0.3:
+            lon_action = "deceleration"
+        elif acceleration > 1.0:
+            lon_action = "quick acceleration"
+        elif acceleration > 0.3:
+            lon_action = "acceleration"
+        else:
+            lon_action = "maintain constant speed"
+
+        cot_text = (
+            f"1. **Scene Analysis**: The ego vehicle is traveling at {velocity:.2f} m/s "
+            f"with acceleration {acceleration:.2f} m/s^2. The driving instruction is "
+            f"to {instruction}. The recent trajectory indicates the vehicle has been "
+            f"following the planned route.\n"
+            f"2. **Identification of Critical Objects**: Based on the camera observations, "
+            f"the key objects to monitor are surrounding vehicles and pedestrians near the "
+            f"ego vehicle's intended path.\n"
+            f"3. **Prediction of Critical Object Behavior**: The surrounding objects are "
+            f"expected to continue their current trajectories. The ego vehicle should "
+            f"maintain a safe distance.\n"
+            f"4. **Ego Vehicle Intent Reasoning**: Given the instruction to {instruction} "
+            f"and current speed of {velocity:.2f} m/s, the ego vehicle should execute "
+            f"a {lat_action} maneuver with {lon_action}.\n"
+            f"5. **Final Action Decision**: Lateral action: {lat_action}. "
+            f"Longitudinal action: {lon_action}.\n"
+        )
+
         assistant_content = [
             {
                 "type": "text",
-                "text": f"<answer>\nThe final output action is: {action_text}\n</answer>",
+                "text": f"{cot_text}<answer>\nThe final output action is: {action_text}\n</answer>",
             }
         ]
 
@@ -207,7 +263,7 @@ class DaggerSFTDataset(Dataset):
             "video_inputs": video_inputs,
             "gt_action": torch.tensor(action_indices, dtype=torch.int64),
             "gt_trajectory": torch.tensor(sample.get("gt_xy", np.zeros((10, 2), dtype=np.float32)), dtype=torch.float32),
-            "has_cot": False,
+            "has_cot": True,
         }
 
 
@@ -380,6 +436,8 @@ def normalize_checkpoint_key(key: str) -> str:
     for prefix in ("_forward_module.", "module."):
         if key.startswith(prefix):
             key = key[len(prefix):]
+    # Strip PyTorch Lightning FSDP wrapper infix
+    key = key.replace("._fsdp_wrapped_module", "")
     for prefix in ("autovla.", "drivevla."):
         if key.startswith(prefix):
             key = key[len(prefix):]
@@ -410,7 +468,7 @@ def checkpoint_key_candidates(key: str) -> Tuple[str, ...]:
 
 def load_sft_checkpoint(model: torch.nn.Module, checkpoint_path: str):
     print(f"Loading SFT checkpoint: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     state_dict = checkpoint.get("state_dict", checkpoint)
     model_state = model.state_dict()
     compatible: Dict[str, torch.Tensor] = {}
@@ -440,6 +498,8 @@ def main():
     parser.add_argument("--accumulate-grad-batches", type=int, default=4)
     parser.add_argument("--checkpoint-every", type=int, default=500)
     parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--sft-model-path", type=str, default=None,
+                        help="Path to SFT checkpoint (PDMS89 .ckpt). Defaults to config.")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -490,7 +550,11 @@ def main():
     )
 
     model = DaggerSFTModel(config, processor, n_action_tokens)
-    load_sft_checkpoint(model, model_cfg["sft_model_path"])
+    sft_path = args.sft_model_path or model_cfg["sft_model_path"]
+    if sft_path and Path(sft_path).exists():
+        load_sft_checkpoint(model, sft_path)
+    else:
+        print(f"WARNING: SFT checkpoint not found at {sft_path}, training from base model only")
 
     output_dir = Path(args.output_dir or f"runs/dagger_sft/{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}")
     output_dir.mkdir(parents=True, exist_ok=True)

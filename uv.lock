@@ -193,7 +193,7 @@ requires-dist = [
     { name = "alpasim-grpc", git = "https://github.com/NVlabs/alpasim.git?subdirectory=src%2Fgrpc&rev=46b401beaec27977cbb86826df8e39cec2d49e49" },
     { name = "cosmos-rl", extras = ["rl", "wfm"], git = "https://github.com/nvidia-cosmos/cosmos-rl.git?rev=d2a2c57c4bd6496482bc42da19a59b4432705eda" },
     { name = "einops" },
-    { name = "flash-attn", url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" },
+    { name = "flash-attn", path = "flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" },
     { name = "grouped-gemm", git = "https://github.com/fanshiqing/grouped_gemm?rev=v1.1.4" },
     { name = "grpcio" },
     { name = "nvidia-ml-py" },
@@ -775,13 +775,13 @@ wheels = [
 [[package]]
 name = "flash-attn"
 version = "2.8.3"
-source = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
+source = { path = "flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
 dependencies = [
     { name = "einops", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "torch", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", hash = "sha256:f25da18657a87fc83dc1bfb8b7751b82246e9db355510226b674fd437c34b5fb" },
+    { filename = "flash_attn-2.8.3+cu12torch2.8cxx11abitrue-cp312-cp312-linux_x86_64.whl", hash = "sha256:f25da18657a87fc83dc1bfb8b7751b82246e9db355510226b674fd437c34b5fb" },
 ]
 
 [package.metadata]

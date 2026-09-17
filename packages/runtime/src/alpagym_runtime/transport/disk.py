@@ -25,7 +25,7 @@ def write_episode(path: Path, episode: EpisodeOutput) -> None:
 
 def read_episode(handle: str | Path) -> EpisodeOutput:
     """Read a rollout episode result from a disk artifact handle."""
-    return torch.load(Path(handle), weights_only=False)
+    return torch.load(Path(handle), weights_only=False, mmap=False)
 
 
 class DiskEpisodeWriter:

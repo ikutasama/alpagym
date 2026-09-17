@@ -359,7 +359,7 @@ def _update_resolved_config(config: dict[str, Any], profile: A100LaunchProfile) 
     # waypoints). The launch script's sed replacement may not match all
     # path formats, so we set it directly here.
     bundle_config = _mapping(policy_model, "bundle_config")
-    bundle_config["checkpoint_path"] = "/tmp/model/AutoVLA/autovla_sft_warmup_step5000.ckpt"
+    bundle_config["checkpoint_path"] = "/tmp/model/AutoVLA/AutoVLA_PDMS_89.ckpt"
     bundle_config["use_cot"] = True
 
     # Ego history must be collected at 0.5s intervals (interval_length) to
@@ -451,10 +451,10 @@ def _update_cosmos_config(config: dict[str, Any], profile: A100LaunchProfile) ->
 
     train_config = _mapping(config, "train")
     train_config["fsdp_reshard_after_forward"] = "never"
-    # CPU offload moves optimizer states to host RAM. Reverted: this shared
-    # host has only ~43GB RAM available and 3 offloaded replicas need
-    # ~150GB, causing kernel OOM kills (dmesg 01:41:58). Gradient
-    # checkpointing now bounds the GPU spike instead.
+    # FSDP CPU offload DISABLED: moving optimizer states to host RAM caused
+    # 3 replicas x ~87GB = ~261GB CPU RAM, triggering kernel OOM kills.
+    # The 3B model (~7.6GB bf16) + AdamW states (~45GB total) fits in 80GB
+    # GPU VRAM without offload. Gradient checkpointing bounds activation spikes.
     train_config["fsdp_offload"] = False
 
     rollout = _mapping(config, "rollout")

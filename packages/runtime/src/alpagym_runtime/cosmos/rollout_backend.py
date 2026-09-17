@@ -128,7 +128,7 @@ class AlpagymRollout(RolloutBase):
                 ("grpc.max_receive_message_length", _MAX_GRPC_MSG_SIZE),
             ],
         )
-        grpc.channel_ready_future(channel).result(timeout=5.0)
+        grpc.channel_ready_future(channel).result(timeout=60.0)
         self._alpasim_runtime_stub = RuntimeServiceStub(channel)
 
         # TODO(cosmos-rl): the right resolution path is

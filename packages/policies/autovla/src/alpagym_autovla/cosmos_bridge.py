@@ -265,6 +265,10 @@ def _load_sft_weights_into_hfmodel(hf_model: "HFModel", ckpt_path: str) -> None:
             k = k[len("autovla."):]
         if k.startswith("vlm."):
             k = k[len("vlm."):]
+        # Strip PyTorch Lightning FSDP wrapper infix, e.g.
+        #   model.layers.0._fsdp_wrapped_module.self_attn.q_proj.weight
+        # → model.layers.0.self_attn.q_proj.weight
+        k = k.replace("._fsdp_wrapped_module", "")
         # Map SFT checkpoint keys (after stripping autovla./vlm.) to
         # HuggingFace Qwen2_5_VLForConditionalGeneration keys:
         #   SFT: visual.*                -> model: model.visual.*
@@ -539,6 +543,64 @@ def patch_cosmos_qwen_model_for_autovla(sft_checkpoint_path: str | None) -> None
     from cosmos_rl.policy.model.base import WeightMapper
     from cosmos_rl.utils.constant import COSMOS_HF_MODEL_TYPES
 
+    # --- Patch -1: Qwen2_5_VLConfig.vocab_size property -------------------
+    # Qwen2_5_VLConfig stores vocab_size in text_config, not at top level.
+    # Many Cosmos-RL internals (vLLM init, weight mapper, rollout_control)
+    # access cfg.vocab_size directly and crash with AttributeError.
+    # Add a property that delegates to text_config.vocab_size so ALL
+    # call sites work, regardless of where the config object came from.
+    try:
+        from transformers import Qwen2_5_VLConfig as _Qwen2_5_VLConfig
+    except ImportError:
+        _Qwen2_5_VLConfig = None
+
+    if _Qwen2_5_VLConfig is not None and not hasattr(_Qwen2_5_VLConfig, "_autovla_vocab_patched"):
+        _orig_get = _Qwen2_5_VLConfig.__dict__.get("vocab_size", None)
+
+        @property
+        def _autovla_vocab_size(self):
+            tc = getattr(self, "text_config", None)
+            if tc is not None and hasattr(tc, "vocab_size"):
+                return tc.vocab_size
+            if _orig_get is not None and isinstance(_orig_get, property):
+                return _orig_get.fget(self)
+            return getattr(self, "_vocab_size", 151936)
+
+        @_autovla_vocab_size.setter
+        def _autovla_vocab_size(self, value):
+            tc = getattr(self, "text_config", None)
+            if tc is not None:
+                tc.vocab_size = value
+            self._vocab_size = value
+
+        _Qwen2_5_VLConfig.vocab_size = _autovla_vocab_size
+        _Qwen2_5_VLConfig._autovla_vocab_patched = True
+
+        # --- Patch: Qwen2_5_VLConfig.eos_token_id property -----------------
+        # Same issue as vocab_size: eos_token_id is stored in text_config,
+        # not at the top level of Qwen2_5_VLConfig.  The AutoVLA trainer
+        # forward (autovla_trainer_forward.py) accesses
+        # qwen_model.config.eos_token_id and crashes with AttributeError.
+        if not hasattr(_Qwen2_5_VLConfig, "_autovla_eos_patched"):
+            @property
+            def _autovla_eos_token_id(self):
+                tc = getattr(self, "text_config", None)
+                if tc is not None and hasattr(tc, "eos_token_id"):
+                    return tc.eos_token_id
+                return getattr(self, "_eos_token_id", None)
+
+            @_autovla_eos_token_id.setter
+            def _autovla_eos_token_id(self, value):
+                tc = getattr(self, "text_config", None)
+                if tc is not None:
+                    tc.eos_token_id = value
+                self._eos_token_id = value
+
+            _Qwen2_5_VLConfig.eos_token_id = _autovla_eos_token_id
+            _Qwen2_5_VLConfig._autovla_eos_patched = True
+            logger.info("Patched Qwen2_5_VLConfig.eos_token_id property to delegate to text_config.eos_token_id")
+        logger.info("Patched Qwen2_5_VLConfig.vocab_size property to delegate to text_config.vocab_size")
+
     if getattr(HFModel, "_autovla_patched", False):
         if sft_checkpoint_path is not None:
             HFModel._autovla_sft_checkpoint_path = sft_checkpoint_path
@@ -566,19 +628,25 @@ def patch_cosmos_qwen_model_for_autovla(sft_checkpoint_path: str | None) -> None
 
     def _patched_autoconfig_from_pretrained(model_name_or_path, *args, **kwargs):
         cfg = _original_autoconfig_from_pretrained(model_name_or_path, *args, **kwargs)
-        if (
-            getattr(cfg, "model_type", None) == "qwen2_5_vl"
-            and getattr(cfg, "vocab_size", 0) < _AUTOVLA_NEEDED_VOCAB
-        ):
-            old_vocab = cfg.vocab_size
-            cfg.vocab_size = _AUTOVLA_NEEDED_VOCAB
-            if hasattr(cfg, "text_config") and hasattr(cfg.text_config, "vocab_size"):
-                cfg.text_config.vocab_size = _AUTOVLA_NEEDED_VOCAB
-            logger.info(
-                "AutoConfig.from_pretrained: resized qwen2_5_vl vocab_size "
-                "%d -> %d for AutoVLA action tokens",
-                old_vocab, _AUTOVLA_NEEDED_VOCAB,
-            )
+        if getattr(cfg, "model_type", None) == "qwen2_5_vl":
+            # Qwen2_5_VLConfig stores vocab_size in text_config, not top-level.
+            text_cfg = getattr(cfg, "text_config", None)
+            if text_cfg is not None and hasattr(text_cfg, "vocab_size"):
+                old_vocab = text_cfg.vocab_size
+            else:
+                old_vocab = getattr(cfg, "vocab_size", 0)
+            if old_vocab < _AUTOVLA_NEEDED_VOCAB:
+                if text_cfg is not None:
+                    text_cfg.vocab_size = _AUTOVLA_NEEDED_VOCAB
+                try:
+                    cfg.vocab_size = _AUTOVLA_NEEDED_VOCAB
+                except (AttributeError, TypeError):
+                    pass  # Qwen2_5_VLConfig delegates to text_config
+                logger.info(
+                    "AutoConfig.from_pretrained: resized qwen2_5_vl vocab_size "
+                    "%d -> %d for AutoVLA action tokens",
+                    old_vocab, _AUTOVLA_NEEDED_VOCAB,
+                )
         return cfg
 
     AutoConfig.from_pretrained = _patched_autoconfig_from_pretrained

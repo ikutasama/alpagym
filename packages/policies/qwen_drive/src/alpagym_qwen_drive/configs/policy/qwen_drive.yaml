@@ -22,7 +22,7 @@ model:
 
 inference:
   max_batch_size: 1
-  return_trace_for_rl: false
+  return_trace_for_rl: true
   sampling:
     top_p: 1.0
     top_k: 0
