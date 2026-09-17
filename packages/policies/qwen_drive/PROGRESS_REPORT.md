@@ -60,6 +60,23 @@ AlpaSim 鈫?PolicyInput 鈫?AlpamayoPolicy._preprocess() 鈫?BatchedModelInput
   - `UV_LINK_MODE=copy` 閬垮厤 hardlink 璺ㄦ枃浠剁郴缁熼棶棰?- **楠岃瘉閫氳繃**: torch 2.8.0+cu128, flash_attn 2.8.3, hydra 1.3.2, redis, cosmos_rl, alpagym_runtime 鍏ㄩ儴瀵煎叆鎴愬姛
 - **qwen_drive bundle 鍔犺浇鎴愬姛**: `get_policy_bundle('qwen_drive')` 杩斿洖 `PolicyBundle` 瀹炰緥
 
+### 2.5 transformers 鐗堟湰鍗囩骇锛堝凡瀹屾垚锛?- **闂**: Qwen-Drive-1.0 妯″瀷 config 浣跨敤 `model_type: qwen3_5`锛岄渶瑕?`transformers>=5.14.0`锛屼絾 AlpaGym 鍘熷鐜浣跨敤 `transformers==4.57.1`
+- **瑙ｅ喅**:
+  - 鍗囩骇鍒?`transformers==5.14.1`锛堜粠 PyPI 鐩存帴涓嬭浇 wheel 瀹夎锛屽洜 uv cache 鏈夋崯鍧忕殑 wheel锛?  - 鍗囩骇 `safetensors==0.8.0`锛堝悓鏍蜂粠 PyPI 鐩存帴涓嬭浇 wheel锛?  - 闄嶇骇 `huggingface_hub==1.5.0`锛坱ransformers 5.14.1 闇€瑕?>=1.5.0, 浣?1.31.0 鍒犻櫎浜?`is_offline_mode`锛?  - 淇濇寔 `diffusers==0.37.1`锛?.40.0 闇€瑕?`get_cached_repo_tree` 涓嶅吋瀹?hub 1.5.0锛?  - 淇濇寔 `click==8.3.3`锛?.5.0 鍒犻櫎浜?`click.command` 瑁呴グ鍣級
+  - 淇濇寔 `datasets==5.0.1`
+- **楠岃瘉閫氳繃**: cosmos_rl 瀵煎叆鎴愬姛锛宷wen_drive bundle 鍔犺浇鎴愬姛
+
+### 2.6 Qwen-Drive 妯″瀷鍔犺浇楠岃瘉锛堝凡瀹屾垚锛?- **鎴愬姛鍔犺浇** `QwenDriveForPlanning.from_pretrained()`:
+  - VLM: Qwen3.5 (5579.1M total params)
+  - Planning Expert: PlanningExpert (separate SFT checkpoint)
+  - 723 weight files loaded in <1s
+  - Model moved to GPU (cuda:1), eval mode set
+- **妯″瀷缁撴瀯纭**:
+  - `model.vlm`: VLM 涓诲共 (AutoModelForImageTextToText)
+  - `model.planning_expert`: Planning Expert (flow-matching trajectory generator)
+  - `model.processor`: 鎳掑姞杞界殑 QwenDriveProcessor (property)
+  - `model.generate_trajectory(scene, mode, num_samples, num_steps, seed)` 鈫?`QwenDriveOutput(trajectories=[N,50,3])`
+
 ---
 
 ## 涓夈€佸綋鍓嶈繘琛屼腑
@@ -72,7 +89,8 @@ AlpaSim 鈫?PolicyInput 鈫?AlpamayoPolicy._preprocess() 鈫?BatchedModelInput
 #### 闂 4: autovla 璁粌浠诲姟鍏辩敤 venv
 褰撳墠鏈夊彟涓€涓?autovla 璁粌浠诲姟锛圥ID 2472853锛夋鍦ㄤ娇鐢ㄥ悓涓€涓?`.venv/bin/python3`锛岄€氳繃 `uv run --no-sync` 鍚姩銆?- 璇ヨ繘绋嬪湪 venv 琚牬鍧忓墠宸插惎鍔紝妯″潡宸插姞杞藉埌鍐呭瓨涓?- venv 鎭㈠鍚庯紙鍦?/tmp锛夛紝鏃х殑 `.venv` 璺緞涓嶅啀鎸囧悜鏈夋晥 venv
 - **闂**: autovla 杩涚▼鏄惁浼氬洜 venv 璺緞鍙樺寲鑰屽穿婧冿紵濡傛灉瀹冮渶瑕侀噸鏂?import 妯″潡锛堜緥濡?fork 瀛愯繘绋嬶級浼氭€庢牱锛?
-#### 闂 5: AlpaSim 杩炴帴鍏变韩
+#### 闂 5: transformers 鐗堟湰鍐茬獊锛堝凡瑙ｅ喅锛?**鍘熷闂**: Qwen-Drive-1.0 妯″瀷闇€瑕?`transformers>=5.14.0`锛坈onfig 涓娇鐢?`model_type: qwen3_5`锛夛紝浣?AlpaGym 鍘熷鐜浣跨敤 `transformers==4.57.1`銆?**褰撳墠鏂规**: 鍗囩骇鍒?`transformers==5.14.1`銆倁v cache 涓湁鎹熷潖鐨?wheel锛堟爣娉?5.14.1 浣嗗疄闄呭寘鍚?4.57.1 浠ｇ爜锛夛紝閫氳繃鐩存帴浠?PyPI 涓嬭浇 wheel 鏂囦欢瀹夎瑙ｅ喅銆傚悓鏃堕渶瑕佸崌绾?`huggingface_hub` 鍒?1.x銆乣datasets` 鍒?5.x銆乣diffusers` 鍒版渶鏂扮増鏈互淇濇寔鍏煎銆?**椋庨櫓**: transformers 5.x 鏄ぇ鐗堟湰鍗囩骇锛屽彲鑳戒笌 cosmos_rl 鎴栧叾浠?AlpaGym 渚濊禆涓嶅吋瀹广€傞渶瑕侀獙璇佸畬鏁村鍏ラ摼銆?
+#### 闂 6: AlpaSim 杩炴帴鍏变韩
 - AlpaSim 鍦ㄨ繙绋嬫湇鍔″櫒 `mti@10.174.175.151` 涓婅繍琛?- 褰撳墠閫氳繃 SSH 闅ч亾鏆撮湶绔彛 5011锛坮untime server锛夊拰 5013锛堝弽鍚戦€氶亾锛?- autovla 浠诲姟姝ｅ湪浣跨敤杩欎釜闅ч亾杩涜璁粌
 - AlpaSim capacity=4锛岀悊璁轰笂鏀寔 4 涓苟鍙?session
 - **闂**: 鏄惁鍙互鍏辩敤鍚屼竴涓毀閬擄紵杩樻槸闇€瑕佸缓绔嬬浜屼釜 SSH 闅ч亾鍒颁笉鍚岀鍙ｏ紵
@@ -80,9 +98,12 @@ AlpaSim 鈫?PolicyInput 鈫?AlpamayoPolicy._preprocess() 鈫?BatchedModelInput
 ---
 
 ## 鍥涖€佷笅涓€姝ヨ鍒?
-1. **Git push 褰撳墠淇敼** 鈥?灏?qwen_drive 閫傞厤鍣ㄤ唬鐮佸拰 pyproject.toml 淇敼鎺ㄩ€佸埌杩滅▼浠撳簱
-2. **楠岃瘉 Qwen-Drive 妯″瀷鍔犺浇** 鈥?鐢ㄧ湡瀹炴ā鍨嬭矾寰勬祴璇?`load_inference_model()` 鏄惁鑳芥垚鍔熷姞杞芥ā鍨?3. **寤虹珛 AlpaSim 杩炴帴** 鈥?纭 SSH 闅ч亾鐘舵€侊紝娴嬭瘯鑳藉惁鍏辩敤鎴栭渶瑕佹柊寤?4. **杩愯闂幆鎺ㄧ悊** 鈥?鐢?qwen_drive_a100_1gpu_inference 閰嶇疆鍚姩闂幆璇勪及
-5. **璋冭瘯 inference_model.py** 鈥?楠岃瘉 camera view 鏋勫缓銆乪go history 鎻愬彇銆乼rajectory 鍚庡鐞嗘槸鍚︽纭?
+1. ~~**Git push 褰撳墠淇敼**~~ 鈥?宸插畬鎴?(commit 6e3c6e0)
+2. ~~**楠岃瘉 Qwen-Drive 妯″瀷鍔犺浇**~~ 鈥?宸插畬鎴?(5.6B params loaded on GPU)
+3. **寤虹珛 AlpaSim 杩炴帴** 鈥?绔彛 5011 宸茬‘璁ゅ紑鏀撅紝闇€娴嬭瘯闂幆鎺ㄧ悊鑳藉惁杩炴帴
+4. **杩愯闂幆鎺ㄧ悊** 鈥?鐢?qwen_drive_a100_1gpu_inference 閰嶇疆鍚姩闂幆璇勪及
+5. **璋冭瘯 inference_model.py** 鈥?楠岃瘉 camera view 鏋勫缓銆乪go history 鎻愬彇銆乼rajectory 鍚庡鐞嗘槸鍚︽纭?6. **绔埌绔祴璇?* 鈥?浠?AlpaSim 鑾峰彇涓€甯ф暟鎹?鈫?鏋勫缓 DrivingScene 鈫?generate_trajectory 鈫?杩斿洖 PolicyOutput
+
 ---
 
 ## 浜斻€佺幆澧冧俊鎭?
