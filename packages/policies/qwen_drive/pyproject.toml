@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alpagym-qwen-drive"
+version = "0.1.0"
+description = "Qwen-Drive-1.0 Planning Expert policy bundle for AlpaGym closed-loop RL."
+dependencies = ["alpagym-runtime", "transformers", "pillow", "numpy"]
+
+[project.entry-points."alpagym.policy_bundles"]
+qwen_drive = "alpagym_qwen_drive.bundle:get_bundle"
+
+[project.entry-points."alpagym.configs"]
+qwen_drive = "alpagym_qwen_drive.configs"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"alpagym_qwen_drive.configs" = ["**/*.yaml"]

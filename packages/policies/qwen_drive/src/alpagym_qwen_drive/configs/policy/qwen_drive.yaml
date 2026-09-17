@@ -1,0 +1,38 @@
+# @package policy
+kind: qwen_drive
+
+model:
+  kind: qwen_drive
+  path: ???
+  device: cuda
+  dtype: bfloat16
+  use_cameras:
+    - camera_front_wide_120fov
+    - camera_cross_left_120fov
+    - camera_cross_right_120fov
+  input_size: [320, 512]
+  num_context_frames: 4
+  num_historical_waypoints: 16
+  num_future_waypoints: 50
+  step_dt_us: 100000
+  bundle_config:
+    planner_path: null
+    upstream_path: null
+    num_inference_steps: 10
+
+inference:
+  max_batch_size: 1
+  return_trace_for_rl: false
+  sampling:
+    top_p: 1.0
+    top_k: 0
+    temperature: 0.0
+    num_traj_samples: 1
+    num_traj_sets: 1
+    max_generation_length: 2048
+    force_determinism: true
+    diffusion_kwargs:
+      noise_level: null
+      temperature: null
+
+trajectory_selector: identity

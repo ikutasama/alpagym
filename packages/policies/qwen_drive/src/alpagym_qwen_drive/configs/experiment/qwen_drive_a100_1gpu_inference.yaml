@@ -1,0 +1,27 @@
+# Qwen-Drive closed-loop inference baseline on A100.
+# Uses 1 GPU for policy inference + rollout, external AlpaSim on remote server.
+# Phase 3: inference-only, no training.
+name: qwen_drive_a100_1gpu_inference
+cuda_visible_devices: "1"
+mode: disaggregated
+transport: disk
+dp_shard_size: 1
+alpasim_topology: 1gpu
+
+policy_replicas: 0
+rollout_replicas: 1
+
+n_generation: 1
+rollout_batch_size: 1
+train_batch_per_replica: 1
+mini_batch: 1
+max_inference_batch_size: 1
+
+max_num_steps: 0
+num_epochs: 0
+learning_rate: 0.0
+warmup_steps: 0
+ratio_clip: 0.0
+allowed_outdated_steps: 0
+save_freq: 0
+grad_norm_clip: 0.0
