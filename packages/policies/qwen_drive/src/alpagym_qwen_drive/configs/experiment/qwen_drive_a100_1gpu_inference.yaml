@@ -1,27 +1,61 @@
+# @package _global_
 # Qwen-Drive closed-loop inference baseline on A100.
 # Uses 1 GPU for policy inference + rollout, external AlpaSim on remote server.
 # Phase 3: inference-only, no training.
-name: qwen_drive_a100_1gpu_inference
-cuda_visible_devices: "1"
-mode: disaggregated
-transport: disk
-dp_shard_size: 1
-alpasim_topology: 1gpu
 
-policy_replicas: 0
-rollout_replicas: 1
+defaults:
+  - override /policy: qwen_drive
+  - override /topology: local_colocated_1gpu
 
-n_generation: 1
-rollout_batch_size: 1
-train_batch_per_replica: 1
-mini_batch: 1
-max_inference_batch_size: 1
+expected_valid_steps: 8
 
-max_num_steps: 0
-num_epochs: 0
-learning_rate: 0.0
-warmup_steps: 0
-ratio_clip: 0.0
-allowed_outdated_steps: 0
-save_freq: 0
-grad_norm_clip: 0.0
+policy:
+  model:
+    path: ???
+  inference:
+    max_batch_size: 1
+    sampling:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: 0
+      num_traj_samples: 1
+      num_traj_sets: 1
+
+dataset:
+  scene_ids:
+    - clipgt-a309e228-26e1-423e-a44c-cb00aa7378cb
+
+alpasim:
+  wizard_args:
+    control_timestep_us: 100_000
+    force_gt_duration_us: 8_000_000
+    n_sim_steps: 88
+    extra_overrides: "runtime.simulation_config.pose_reporting_interval_us=500000"
+
+cosmos:
+  mode: colocated
+  launch:
+    policy_replicas: 0
+    rollout_replicas: 1
+  policy:
+    parallelism:
+      dp_shard_size: 1
+  train:
+    max_num_steps: 0
+    num_epochs: 0
+    train_batch_per_replica: 1
+    optm_lr: 0.0
+    optm_warmup_steps: 0
+    ckpt:
+      enable_checkpoint: false
+      export_safetensors: false
+    train_policy:
+      mini_batch: 1
+      grpo_optimization_iterations: 0
+      kl_beta: 0.0
+  rollout:
+    n_generation: 1
+    batch_size: 1
+    prefetch_rollout: false
+  logging:
+    experiment_name: qwen_drive_a100_1gpu_inference
