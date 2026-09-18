@@ -237,3 +237,43 @@ unit test 銇?batch 浠樸亶 tensor 銈掔洿鎺ユ浮銇椼仸銇勩仧銇熴�
 1. **epsilon sweep {0.1, 0.3, 1.0}** (docs/PHASE4_GRPO.md 鎺ㄥエ):
    epsilon=0.05 銇?likelihood 銇岄嫮銇欍亷 (clip 32%) 銇嬨仱 generation 闁撱伄琛屽嫊宸亴灏忋仌銇欍亷
    (reward_std=0.0018) 鈥?GRPO 銇?advantage 銇屽疅璩?noise銆傘倛銈婂ぇ銇嶃亜 epsilon 銇ф帰绱倰纰轰繚銆?2. `max_num_steps > 1` 銇ц鏁?epoch 銇湰鐣缈掋€?3. scene 澶氭鍖?(170 scenes 銇嬨倝瑜囨暟 prompt) 銇?generalization銆?4. `/tmp` 璩囩敚 (venv, qd_model, qd_runs) 銇案缍氥儜銈圭Щ瑷€?
+## Phase 4.2: epsilon sweep 銇?20-step 鏈暘瀛︾繏 (2026-09-18)
+
+### epsilon sweep 绲愭灉 (1-step run 脳 3, GPU 6, scene e121e37d)
+
+| epsilon | reward_mean | reward_std | best | clip_fraction | grad_norm |
+|---|---|---|---|---|---|
+| 0.05 (寰撴潵) | -0.0578 | 0.0018 | -0.0561 | 0.318 | 364.8 |
+| **0.1 (鎺＄敤)** | **-0.0483** | 0.0115 | **-0.0368** | **0.000** | 328.4 |
+| 0.3 | -0.0807 | 0.0087 | -0.0719 | 0.045 | 101.2 |
+| 1.0 | -0.1411 | 0.0257 | -0.1154 | 0.000 | 9.7 |
+
+**epsilon=0.1 銇屾渶閬?*: 鎺㈢储 (generation 闁?reward_std 銇?6.4 鍊? 銇ㄨ粚璺″搧璩伄
+銉愩儵銉炽偣銇屾渶鑹仹銆丳PO clip 銈?0% (鍏?minibatch 銇屽缈掋伀瀵勪笌)銆?epsilon>=0.3 銇憘鍕曘亴澶с亶銇欍亷銇﹁粚璺″搧璩亴宕╁ (RMSE 7-14m)銆?
+### checkpoint crash 銇慨姝?(commit 84f4630)
+
+20-step run 1 鍥炵洰銇?step 10 銇垵鍥?checkpoint save 銇?crash:
+`AttributeError: 'QwenDriveCosmos' object has no attribute 'vlm'`
+鈥?cosmos DCP (`torch.distributed.checkpoint`) 銇?optimizer param 銇?FQN 銈?wrapper (`QwenDriveCosmos`) 銇睘鎬с仺銇椼仸瑙ｆ焙銇椼倛銇嗐仺銇椼仸澶辨晽 (瀹熶綋銇?`wrapper.model.vlm`)銆?
+淇: `AlpaGymGRPOTrainer._save_checkpoint` 銇繚瀛樺墠銇?**planning expert (鍞竴銇缈掑璞°€俈LM 銇噸绲?** 銇?state_dict 銈?`<output_dir>/checkpoints/step_N/planning_expert.safetensors` 銇稿繀銇氭浉銇嶅嚭銇椼€?cosmos DCP / HF export 銇け鏁椼伅 warning 銇牸涓嬨亽銇椼仸瀛︾繏銈掔稒缍氥€?expert 銈掓寔銇熴仾銇?policy (AutoVLA) 銇緭鏉ャ仼銇娿倞渚嬪銈?re-raise銆?
+### 20-step 鏈暘瀛︾繏 (run 20260918T143718Z, epsilon=0.1, ckpt freq=10, exit 0)
+
+| step | reward_mean | 鍌欒€?| step | reward_mean | 鍌欒€?|
+|---|---|---|---|---|---|
+| 1 | -0.0564 | 闁嬪 5.6m RMSE | 11 | -0.0074 | max -0.0014 |
+| 2 | -0.0560 | | 12 | **-0.0014** | **best: 0.14m RMSE (40x)** |
+| 3 | -0.0564 | max -0.0387 | 13 | -0.0278 | max -0.0239 |
+| 4 | -0.0741 | | 14 | -0.0239 | |
+| 5 | -0.0066 | 0.66m 銇敼鍠?| 15 | -0.0343 | max -0.0250 |
+| 6 | -0.0065 | | 16 | -0.0437 | |
+| 7 | -0.0381 | 鎸嫊 | 17 | -0.0407 | max -0.0385 |
+| 8 | -0.0542 | | 18 | -0.0428 | |
+| 9 | -0.0271 | max -0.0176 | 19 | -0.0349 | max -0.0337 |
+| 10 | -0.0176 | **ckpt 淇濆瓨 (1.76m)** | 20 | -0.0337 | **ckpt 淇濆瓨 (final)** |
+
+- 瀛︾繏鍛ㄦ湡: 鎺㈢储 step (reward_std>0, advantage 卤1) 鈫?鏀瑰杽 鈫?鍥哄畾 step
+  (std=0, advantage 0) 銇拱銈婅繑銇椼仹鐫€瀹熴伀 best 銈掓洿鏂般€?- 闁嬪 5.6m 鈫?step 12 銇?**0.14m**銆傘仧銇犮仐 KL 姝ｅ墖銇仐 (kl_beta=0) 銇仧銈?  浠ュ緦鎸嫊銇?final 銇?3.37m銆?- 鎴愭灉鐗? `checkpoints/step_10/planning_expert.safetensors` (1.76m 鏅傜偣) 銇?  `checkpoints/step_20/planning_expert.safetensors` (final)銆傚悇 358 tensors / 4.16GB銆?  best (step 12) 銇?save_freq=10 銇仧銈佹湭淇濆瓨銆?- AutoVLA 銇搞伄褰遍熆: 銇仐 (PID 4 鏈?alive, GPU 2-5 绋煎儘缍欑稓銆乸ort 5013 鐒″偡)銆?
+### 娆°伄銈广儐銉冦儣 (鏇存柊)
+
+1. **瀹夊畾鍖?*: `save_freq=1` 銇у叏 step 銇?expert 銈掍繚瀛?+ `kl_beta>0` 銇俱仧銇?   lr decay 銇?best weights 銇彇銈娿亾銇笺仐銈掗槻銇愩€?2. **scene 澶氭鍖?*: 170 scenes 銇嬨倝瑜囨暟 prompt (鍚?step 銇с儹銉笺儐銉笺偡銉с兂)銆?3. **瀛︾繏娓堛伩 expert 銇渚?*: 淇濆瓨 safetensors 銈?planner 銇樊銇楁浛銇堛仸
+   姹哄畾鐨?rollout 銇ф€ц兘纰鸿獚銆?4. **/tmp 璩囩敚銇亽涔呫儜銈圭Щ瑷?* (venv, qd_model, qd_runs)銆?
