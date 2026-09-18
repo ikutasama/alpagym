@@ -605,6 +605,37 @@ class AlpagymGRPOTrainer(_grpo_trainer.GRPOTrainer):
     # Checkpointing
     # ------------------------------------------------------------------
 
+    def _save_expert_safetensors(self, current_step: int) -> str | None:
+        """Persist the Qwen-Drive planning expert weights as a safetensors file.
+
+        The stochastic-GRPO policy trains ONLY the planning expert (the VLM is
+        frozen), so this file is the complete trainable artifact of a run 鈥?        users resume/deploy from it. Returns the written path, or None for
+        policies without a planning expert (e.g. AutoVLA) so their checkpoint
+        behavior is unchanged.
+        """
+        inner = getattr(self.model, "model", None)
+        expert = getattr(inner, "planning_expert", None)
+        if not isinstance(expert, torch.nn.Module):
+            return None
+        out_dir = os.path.join(
+            self.config.train.output_dir, "checkpoints", f"step_{current_step}"
+        )
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, "planning_expert.safetensors")
+        state = {
+            key: value.detach().to("cpu", copy=True).contiguous()
+            for key, value in expert.state_dict().items()
+        }
+        from safetensors.torch import save_file
+
+        save_file(state, path)
+        logger.info(
+            "[Policy] Saved planning expert safetensors (%d tensors) to %s",
+            len(state),
+            path,
+        )
+        return path
+
     def _save_checkpoint(
         self,
         current_step: int,
@@ -624,33 +655,49 @@ class AlpagymGRPOTrainer(_grpo_trainer.GRPOTrainer):
         ``cosmos_config.toml``.
         """
         is_last_step = current_step == total_steps
-        if is_last_step or self.config.train.ckpt.export_safetensors:
-            logger.info(
-                "[Policy] Saving huggingface checkpoint at step %d to %s",
-                current_step,
-                self.config.train.output_dir,
-            )
-            self.export_safetensors(
-                output_dir=self.config.train.output_dir,
-                rel_path=os.path.join("safetensors", f"step_{current_step}"),
-                trainable_only=False,
-                is_final=is_last_step,
-                # cosmos's `param_dtype` is one of "bfloat16" / "float16" /
-                # "float32"; all map to `torch.<name>` directly.
-                dtype=getattr(torch, str(self.config.train.param_dtype).lower()),
-            )
+        # Qwen-Drive: persist the planning expert FIRST 鈥?it is the only
+        # trainable component (the VLM stays frozen), and the cosmos DCP
+        # resume path below cannot map optimizer FQNs through the
+        # QwenDriveCosmos wrapper (AttributeError on 'vlm').
+        expert_path = self._save_expert_safetensors(current_step)
+        try:
+            if is_last_step or self.config.train.ckpt.export_safetensors:
+                logger.info(
+                    "[Policy] Saving huggingface checkpoint at step %d to %s",
+                    current_step,
+                    self.config.train.output_dir,
+                )
+                self.export_safetensors(
+                    output_dir=self.config.train.output_dir,
+                    rel_path=os.path.join("safetensors", f"step_{current_step}"),
+                    trainable_only=False,
+                    is_final=is_last_step,
+                    # cosmos's `param_dtype` is one of "bfloat16" / "float16" /
+                    # "float32"; all map to `torch.<name>` directly.
+                    dtype=getattr(torch, str(self.config.train.param_dtype).lower()),
+                )
 
-        logger.info("[Policy] Saving cosmos checkpoint at step %d", current_step)
-        self.ckpt_manager.save_checkpoint(
-            model=self.model,
-            optimizer=self.optimizers,
-            scheduler=self.lr_schedulers,
-            step=current_step,
-            total_steps=total_steps,
-            remain_samples_num=remain_samples_num,
-            is_final=is_last_step,
-        )
-        self.ckpt_manager.save_check(step=current_step)
+            logger.info("[Policy] Saving cosmos checkpoint at step %d", current_step)
+            self.ckpt_manager.save_checkpoint(
+                model=self.model,
+                optimizer=self.optimizers,
+                scheduler=self.lr_schedulers,
+                step=current_step,
+                total_steps=total_steps,
+                remain_samples_num=remain_samples_num,
+                is_final=is_last_step,
+            )
+            self.ckpt_manager.save_check(step=current_step)
+        except Exception as exc:
+            if expert_path is None:
+                raise
+            logger.warning(
+                "[Policy] cosmos checkpoint machinery failed at step %d (%s); "
+                "planning-expert safetensors already saved to %s 鈥?continuing",
+                current_step,
+                exc,
+                expert_path,
+            )
 
     # ------------------------------------------------------------------
     # Reference model lifecycle
