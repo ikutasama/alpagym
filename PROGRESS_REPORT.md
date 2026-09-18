@@ -277,3 +277,24 @@ unit test 銇?batch 浠樸亶 tensor 銈掔洿鎺ユ浮銇椼仸銇勩仧銇熴�
 
 1. **瀹夊畾鍖?*: `save_freq=1` 銇у叏 step 銇?expert 銈掍繚瀛?+ `kl_beta>0` 銇俱仧銇?   lr decay 銇?best weights 銇彇銈娿亾銇笺仐銈掗槻銇愩€?2. **scene 澶氭鍖?*: 170 scenes 銇嬨倝瑜囨暟 prompt (鍚?step 銇с儹銉笺儐銉笺偡銉с兂)銆?3. **瀛︾繏娓堛伩 expert 銇渚?*: 淇濆瓨 safetensors 銈?planner 銇樊銇楁浛銇堛仸
    姹哄畾鐨?rollout 銇ф€ц兘纰鸿獚銆?4. **/tmp 璩囩敚銇亽涔呫儜銈圭Щ瑷?* (venv, qd_model, qd_runs)銆?
+## Phase 4.3: 瀛︾繏璩囩敚銇?m181 绉昏ō (2026-09-18)
+
+銉︺兗銈躲兗鎸囩ず: m62 銉炪偊銉炽儓銇銇垮彇銈娿亴銉溿儓銉儘銉冦偗銇仾銈嬪牬鍚堛伅
+`/data/mnt_m181/z59900495/workspace/data-autovla-rl` (楂橀€熴兓瀹归噺鍗佸垎) 銈掍娇鐢ㄣ€?
+### 瀹熸脯銉欍兂銉併優銉笺偗 (dd, 1GB)
+
+| mount | write | read | 绌恒亶 |
+|---|---|---|---|
+| m181 (data-autovla-rl) | **127 MB/s** | 294 MB/s | 16 TB |
+| m62 (workspace) | 94.9 MB/s | (page cache 銇仧銈佸弬鑰冨€? | 244 TB |
+
+### 绉昏ō鍐呭 (rsync -a銆?tmp 銇偑銉偢銉娿儷銇儠銈┿兗銉儛銉冦偗銇ㄣ仐銇︽畫瀛?
+
+| 璩囩敚 | 銈点偆銈?| 妞滆 |
+|---|---|---|
+| `qd_model` (VLM 閲嶃伩) | 11 GB / 21 files | model.safetensors 723 tensors 瑾彇妞滆 鉁?|
+| `qd_runs/.../checkpoints/final` (SFT expert) | 12 GB / 4 files | model.safetensors 358 tensors 鉁?(+training_state.pt 8.3GB) |
+| `alpagym_venv` | 12 GB | 銈炽償銉煎緦 import 妞滆 |
+
+銉┿兂銉併儯銉?(`/tmp/run_phase4_grpo.sh`) 銇?`VENV` / `MODEL_PATH` / `PLANNER_PATH`
+銈?m181 銉戙偣銇垏鏇挎笀銇裤€傛鍥?run 銇嬨倝 m181 銇嬨倝銉兗銉夈€?`/tmp/qd_model` 銇仼鏃с儜銈广倐褰撻潰銇濄伄銇俱伨淇濇寔 (璧峰嫊銈广偗銉儣銉堜慨姝ｅ墠銇儠銈┿兗銉儛銉冦偗)銆?
