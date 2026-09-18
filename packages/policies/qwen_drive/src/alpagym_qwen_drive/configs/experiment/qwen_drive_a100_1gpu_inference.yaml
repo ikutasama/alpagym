@@ -7,7 +7,7 @@ defaults:
   - override /policy: qwen_drive
   - override /topology: local_colocated_1gpu
 
-expected_valid_steps: 8
+expected_valid_steps: 22
 
 policy:
   model:
@@ -30,7 +30,7 @@ alpasim:
   wizard_args:
     control_timestep_us: 100_000
     force_gt_duration_us: 8_000_000
-    n_sim_steps: 88
+    n_sim_steps: 102
     extra_overrides: "runtime.simulation_config.pose_reporting_interval_us=500000"
 
 cosmos:
