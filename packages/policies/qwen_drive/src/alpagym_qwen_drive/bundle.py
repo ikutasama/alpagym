@@ -4,13 +4,13 @@ Adapter between AlpaGym's typed I/O (BatchedModelInput/BatchedModelOutput)
 and Qwen-Drive's flow-matching Planning Expert pipeline.
 """
 
-from __future__ import annotations
 
 import functools
 import logging
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from alpagym_runtime.policies.registry import PolicyBundle
 
@@ -91,14 +91,28 @@ def build_data_packer(run_config: Any, cosmos_role: str | None) -> Any:
     install_runtime_bridge(upstream_path=upstream)
 
     # Inject the planner path so QwenDriveCosmos.load_hf_weights can find
-    # the Planning Expert checkpoint.
-    try:
-        from alpagym_qwen_drive.cosmos_wrapper import set_planner_path
+    # the Planning Expert checkpoint, and the shared RL sampling config so
+    # rollout and trainer evaluate the same stochastic policy.
+    from alpagym_qwen_drive.cosmos_wrapper import (
+        set_planner_path,
+        set_rl_sampling_config,
+    )
+    from alpagym_qwen_drive.stochastic_sampler import StochasticSamplingConfig
 
-        planner_path = run_config.policy.model.bundle_config.get("planner_path")
-        set_planner_path(planner_path)
-    except (ImportError, AttributeError, KeyError):
-        pass
+    bundle_config = run_config.policy.model.bundle_config
+    set_planner_path(bundle_config.get("planner_path"))
+    if bundle_config.get("rl_sampling"):
+        set_rl_sampling_config(
+            StochasticSamplingConfig(
+                epsilon=float(bundle_config.get("rl_epsilon", 0.05)),
+                num_modes=int(bundle_config.get("rl_num_modes", 8)),
+                num_inference_steps=int(
+                    bundle_config.get("num_inference_steps", 10)
+                ),
+            )
+        )
+    else:
+        set_rl_sampling_config(None)
 
     return build_alpagym_data_packer(
         run_config=run_config,
@@ -158,10 +172,20 @@ def load_inference_model(
     # The processor is a lazy property on the model 鈥?access it to trigger loading
     processor = model.processor
 
-    # Build inference adapter
+    # Build inference adapter. RL sampling is enabled only for training runs:
+    # the stochastic sampler records the trace the GRPO trainer replays.
     from alpagym_qwen_drive.inference_model import QwenDriveInferenceModel
 
     bc = model_cfg.bundle_config
+    rl_sampling_config = None
+    if bc.get("rl_sampling"):
+        from alpagym_qwen_drive.stochastic_sampler import StochasticSamplingConfig
+
+        rl_sampling_config = StochasticSamplingConfig(
+            epsilon=float(bc.get("rl_epsilon", 0.05)),
+            num_modes=int(bc.get("rl_num_modes", 8)),
+            num_inference_steps=int(bc.get("num_inference_steps", 10)),
+        )
     return QwenDriveInferenceModel(
         model=model,
         processor=processor,
@@ -170,6 +194,7 @@ def load_inference_model(
         num_future_waypoints=model_cfg.num_future_waypoints,
         step_dt_us=model_cfg.step_dt_us,
         num_inference_steps=bc.get("num_inference_steps", 10),
+        rl_sampling_config=rl_sampling_config,
     )
 
 

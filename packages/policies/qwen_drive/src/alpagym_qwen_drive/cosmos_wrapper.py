@@ -17,19 +17,26 @@ whose path is injected via :func:`set_planner_path` from the policy
 bundle's ``install_runtime_bridge`` hook.
 """
 
-from __future__ import annotations
 
 import json
 import logging
 import os
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
+import numpy as np
 import torch
-from safetensors.torch import load_file
 from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
 from cosmos_rl.policy.model.hf_models.weight_mapper import HFModelWeightMapper
 from cosmos_rl.utils.logging import logger as cosmos_logger
+from PIL import Image
+from safetensors.torch import load_file
 from transformers import AutoConfig, AutoModel
+
+from alpagym_qwen_drive.stochastic_sampler import (
+    StochasticSamplingConfig,
+    stochastic_logprob,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +132,28 @@ def set_planner_path(path: str | None) -> None:
         logger.info("QwenDriveCosmos: planner path set to %s", path)
 
 
+_DEFAULT_RL_SAMPLING_CONFIG = None
+
+
+def set_rl_sampling_config(config: StochasticSamplingConfig | None) -> None:
+    """Store the stochastic sampling knobs shared by rollout and trainer.
+
+    ``build_data_packer`` calls this before the trainer instantiates
+    ``QwenDriveCosmos`` so the class-level default picks the configured
+    sampler; the trainer's ``__init__`` copies it onto the instance.
+    """
+    global _DEFAULT_RL_SAMPLING_CONFIG
+    _DEFAULT_RL_SAMPLING_CONFIG = config
+    if config is not None:
+        logger.info(
+            "QwenDriveCosmos: rl sampling config set (epsilon=%.4g, m=%d)",
+            config.epsilon,
+            config.num_modes,
+        )
+
+
+
+
 # ---------------------------------------------------------------------------
 # AutoConfig / AutoModel registration
 # ---------------------------------------------------------------------------
@@ -179,6 +208,12 @@ class QwenDriveCosmos(BaseModel):
     def __init__(self, hf_config: AutoConfig) -> None:
         super().__init__(hf_config)
         self.hf_config = hf_config
+        # Sampler knobs for the trainer-side likelihood re-evaluation; set by
+        # ``set_rl_sampling_config`` from the policy bundle so the trainer and
+        # the rollout share one source of truth.
+        self.rl_sampling_config = (
+            _DEFAULT_RL_SAMPLING_CONFIG or StochasticSamplingConfig()
+        )
 
         # Build the model from config (on meta device when called inside
         # ``init_on_device("meta")`` context).
@@ -228,7 +263,6 @@ class QwenDriveCosmos(BaseModel):
         Expert checkpoint path is read from the module-level
         ``_PLANNER_PATH`` (set by ``bundle.install_runtime_bridge``).
         """
-        from safetensors.torch import load_file
 
         model_path = model_name_or_path
 
@@ -328,7 +362,7 @@ class QwenDriveCosmos(BaseModel):
 
         if prefix_strip and state:
             state = {
-                k[len(prefix_strip) :] if k.startswith(prefix_strip) else k: v
+                k.removeprefix(prefix_strip): v
                 for k, v in state.items()
             }
         return state
@@ -367,44 +401,154 @@ class QwenDriveCosmos(BaseModel):
     # -- forward (GRPO training) --------------------------------------------
 
     def forward(self, teacher_model: Any = None, **kwargs: Any) -> dict[str, Any]:
-        """Forward pass for GRPO training.
+        """Forward pass for GRPO training (Phase 4).
 
-        Phase 3 (smoke test): returns dummy log_probs so the training
-        step completes without errors.
+        Rebuilds the driving scene from the replayed raw inputs, re-runs the
+        frozen VLM prefill (no gradients), and evaluates the differentiable
+        stochastic-sampler log-probability (paper Eq. 12/14) of the recorded
+        subspace actions under the current Planning Expert parameters.
 
-        Phase 4: will compute the flow-matching log-probability of the
-        recorded trajectory (samples_list) under the current policy.
+        The packer stacks single-step replay rows into a leading batch dim:
+        every leaf arrives as ``[B, ...]``. Conditioning tensors carry their
+        original trailing shapes; the selected-sample trace leaves
+        (``selected_states`` ``[B, N+1, T, D]``, ``selected_z`` ``[B, K, m]``)
+        are already per-row. Rows are processed one at a time because each
+        step's prompt differs (the scene cache cannot be shared across rows).
         """
-        is_padding = kwargs.get("is_padding")
-        if is_padding is not None:
-            batch_size = is_padding.shape[0]
-            device = is_padding.device
-        else:
-            # Try to infer batch size from other inputs
-            for key in ("ego_history_xyz", "camera_frames", "samples_list"):
-                val = kwargs.get(key)
-                if val is not None and hasattr(val, "shape"):
-                    batch_size = val.shape[0]
-                    device = val.device
-                    break
-            else:
-                batch_size = 1
-                device = next(self.parameters()).device
 
-        log_probs = torch.zeros(batch_size, device=device, dtype=torch.float32)
-        # Connect log_probs to model parameters so loss.backward() has a grad_fn.
-        # The 0.0 multiplier ensures values don't change; with lr=0.0 the optimizer
-        # step is a no-op. Phase 4 will replace this with real flow-matching logprobs.
-        trainable_params = [p for p in self.parameters() if p.requires_grad]
-        if trainable_params:
-            log_probs = log_probs + 0.0 * trainable_params[0].sum()
+
+        camera_frames = kwargs["camera_frames"]  # [B, C*T, 3, H, W] uint8
+        batch_size = camera_frames.shape[0]
+        device = next(self.model.vlm.parameters()).device
+
+        is_padding = kwargs.get("is_padding")
+        if is_padding is None:
+            is_padding = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+        log_probs = torch.zeros(batch_size, dtype=torch.float32, device=device)
+        for row in range(batch_size):
+            if bool(is_padding[row]):
+                # Padding rows forward a finite zero log-prob; the trainer's
+                # mask (zero advantage + KL mask) neutralizes them.
+                continue
+            log_probs[row] = self._replay_row_logprob(kwargs, row, device)
+
         kl_div = None
         if teacher_model is not None:
-            kl_div = torch.zeros(batch_size, device=device, dtype=torch.float32)
-            if trainable_params:
-                kl_div = kl_div + 0.0 * trainable_params[0].sum()
+            kl_div = torch.zeros(batch_size, dtype=torch.float32, device=device)
 
         return {"log_probs": log_probs, "kl_div": kl_div}
+
+    def _replay_row_logprob(
+        self, kwargs: dict[str, Any], row: int, device: torch.device
+    ) -> torch.Tensor:
+        """Score one replayed step's recorded action (paper Eq. 12/14).
+
+        Mirrors the rollout-side adapter: rebuild the ``DrivingScene``, run
+        the processor and the frozen VLM prefill, then call
+        :func:`stochastic_logprob` with the recorded initial noise and
+        subspace coefficients. Gradients flow only through the Planning
+        Expert's ``predict_endpoint``.
+        """
+        from qwen_drive.scene import DrivingScene
+        from qwen_drive.trajectory import normalize_history
+
+        from alpagym_qwen_drive.inference_model import (
+            compute_history_velocity_acceleration,
+            route_to_nav_command,
+        )
+
+        views = self._build_replay_views(kwargs, row)
+        history = kwargs["ego_history_xyz"][row].float()
+        history_rot = kwargs["ego_history_rot"][row].float()
+        # Drop the rollout adapter's extra "set" axis if present.
+        if history.dim() == 3:
+            history = history[0]
+        if history_rot.dim() == 4:
+            history_rot = history_rot[0]
+        headings = torch.atan2(history_rot[..., 1, 0], history_rot[..., 0, 0])
+        history_tha = torch.stack(
+            [history[:, 0], history[:, 1], headings], dim=-1
+        )
+        history_velocity, history_acceleration = compute_history_velocity_acceleration(
+            history_tha.cpu().numpy(), dt=0.1
+        )
+        nav_command = route_to_nav_command(kwargs["route_xy"][row].float())
+        driving_command = torch.zeros(4, dtype=torch.float32)
+        driving_command[nav_command] = 1.0
+
+        scene = DrivingScene(
+            views=views,
+            history=history_tha.cpu().numpy(),
+            history_velocity=history_velocity,
+            history_acceleration=history_acceleration,
+            ego_velocity=history_velocity[-1],
+            ego_acceleration=history_acceleration[-1],
+            driving_command=driving_command.numpy(),
+            nav_command=nav_command,
+            token=f"replay_row_{row}",
+        )
+        inputs = self.model.processor(scene, with_reasoning=False, device=device)
+        inputs = {
+            key: value.to(device) if torch.is_tensor(value) else value
+            for key, value in inputs.items()
+        }
+        scene_cache, anchor = self.model._prefill(inputs)
+        scale = self.model.trajectory_scale(device)
+        normalized_history = normalize_history(inputs["history"].float(), scale)
+
+        config = self.rl_sampling_config
+        return stochastic_logprob(
+            self.model.planning_expert,
+            scene_cache=scene_cache,
+            position_anchor=anchor,
+            history=normalized_history,
+            history_velocity=inputs["history_velocity"].float(),
+            history_acceleration=inputs["history_acceleration"].float(),
+            nav_command=inputs["nav_command"],
+            ego_status=inputs["ego_status"].float(),
+            states=kwargs["selected_states"][row].float(),
+            z=kwargs["selected_z"][row].float(),
+            config=config,
+        )
+
+    def _build_replay_views(
+        self, kwargs: dict[str, Any], row: int
+    ) -> dict:
+        """Group one replay row's frames into Qwen-Drive view lists.
+
+        Mirrors the rollout-side ``_build_camera_views``: frames ordered
+        camera-major, view names assigned in fixed order.
+        """
+        from qwen_drive.scene import CameraFrame
+
+        from alpagym_qwen_drive.inference_model import QWEN_DRIVE_VIEWS
+
+        camera_frames = kwargs["camera_frames"][row]  # [C*T, 3, H, W]
+        camera_indices = kwargs["camera_indices"][row]  # [C*T]
+        unique_cams = torch.unique(camera_indices)
+        views = {}
+        for cam_idx_pos, cam_id_val in enumerate(unique_cams.tolist()):
+            cam_mask = camera_indices == cam_id_val
+            cam_frames = camera_frames[cam_mask]
+            view_name = (
+                QWEN_DRIVE_VIEWS[cam_idx_pos]
+                if cam_idx_pos < len(QWEN_DRIVE_VIEWS)
+                else QWEN_DRIVE_VIEWS[0]
+            )
+            frame_list = []
+            for t in range(cam_frames.shape[0]):
+                frame_hwc = cam_frames[t].permute(1, 2, 0).cpu().numpy()
+                if frame_hwc.shape[2] == 1:
+                    frame_hwc = np.repeat(frame_hwc, 3, axis=2)
+                frame_list.append(
+                    CameraFrame(image=Image.fromarray(frame_hwc.astype(np.uint8)))
+                )
+            views[view_name] = frame_list
+        for view_name in QWEN_DRIVE_VIEWS:
+            if view_name not in views:
+                views[view_name] = views.get(QWEN_DRIVE_VIEWS[0], [])
+        return views
 
     # -- parallelism / FSDP -------------------------------------------------
 
@@ -459,7 +603,6 @@ class QwenDriveCosmos(BaseModel):
         No-op for Qwen-Drive; the VLM and expert are already materialised
         by ``load_hf_weights``.
         """
-        pass
 
     def separate_model_parts(self) -> list[torch.nn.Module]:
         """Return model sub-modules for per-part parallelization."""

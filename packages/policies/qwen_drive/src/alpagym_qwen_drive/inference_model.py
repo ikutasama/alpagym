@@ -11,7 +11,6 @@ Key differences from AutoVLA:
 - logprob is None for Phase 3 (inference baseline); Phase 4 (GRPO) will add it
 """
 
-from __future__ import annotations
 
 import logging
 import math
@@ -19,8 +18,6 @@ from typing import Any
 
 import numpy as np
 import torch
-from PIL import Image
-
 from alpagym_host.config import SamplingParamsConfig
 from alpagym_runtime.inference.types import (
     BatchedModelInput,
@@ -28,7 +25,16 @@ from alpagym_runtime.inference.types import (
     ModelInput,
     ModelOutput,
 )
-from alpagym_runtime.replay import ActionSelection, PolicyReplayData
+from alpagym_runtime.replay import (
+    ActionSelection,
+    PolicyReplayData,
+    require_payload_keys,
+)
+from PIL import Image
+
+from alpagym_qwen_drive.stochastic_sampler import (
+    stochastic_sample,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +167,7 @@ class QwenDriveInferenceModel:
         num_future_waypoints: int = 50,
         step_dt_us: int = 100000,
         num_inference_steps: int = 10,
+        rl_sampling_config: Any = None,
     ) -> None:
         self._model = model
         self._processor = processor
@@ -169,6 +176,7 @@ class QwenDriveInferenceModel:
         self._num_future_waypoints = num_future_waypoints
         self._step_dt_us = step_dt_us
         self._num_inference_steps = num_inference_steps
+        self._rl_sampling_config = rl_sampling_config
         self._step_counter = 0
 
     def _get_inner_model(self) -> Any:
@@ -209,22 +217,40 @@ class QwenDriveInferenceModel:
 
         all_pred_xyz = []
         all_pred_rot = []
+        all_rl_traces: list[list[dict[str, Any] | None]] = []
 
         for batch_idx in range(batch_size):
-            pred_xyz, pred_rot = self._infer_single(
+            pred_xyz, pred_rot, rl_trace = self._infer_single(
                 model_input, batch_idx, num_samples
             )
             all_pred_xyz.append(pred_xyz)
             all_pred_rot.append(pred_rot)
+            all_rl_traces.append(rl_trace)
 
         pred_xyz = torch.stack(all_pred_xyz, dim=0)  # [B, S, K, T, 3]
         pred_rot = torch.stack(all_pred_rot, dim=0)  # [B, S, K, T, 3, 3]
 
+        if all_rl_traces and all_rl_traces[0] is not None:
+            # Stack each trace key across the batch axis so the leaves carry
+            # the leading dim ``unbind`` requires. Trace tensors already hold
+            # the sample axis K inside them ([K, ...]).
+            extra = {
+                key: torch.stack(
+                    [trace[key] for trace in all_rl_traces], dim=0
+                )
+                for key in all_rl_traces[0]
+            }
+            # logprob: [B] rows of [K] trajectory-level log-densities.
+            logprob = extra.pop("old_logprob").view(batch_size, 1, num_samples)
+        else:
+            logprob = None
+            extra = {}
+
         return BatchedModelOutput(
             pred_xyz=pred_xyz,
             pred_rot=pred_rot,
-            logprob=torch.zeros(batch_size, 1, num_samples),  # Dummy logprob to trigger replay_data creation
-            extra={},
+            logprob=logprob,
+            extra=extra,
         )
 
     def _infer_single(
@@ -232,12 +258,14 @@ class QwenDriveInferenceModel:
         model_input: BatchedModelInput,
         batch_idx: int,
         num_samples: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any] | None]:
         """Process one batch row: build DrivingScene, run inference, decode trajectory.
 
         Returns:
             pred_xyz: [1, num_samples, T, 3]
             pred_rot: [1, num_samples, T, 3, 3]
+            rl_trace: per-sample RL trace dict (``None`` when deterministic
+                planning is used). Each value stacks the K samples on dim 0.
         """
         # 1. Extract camera frames and convert to DrivingScene views
         views = self._build_camera_views(model_input, batch_idx)
@@ -257,7 +285,7 @@ class QwenDriveInferenceModel:
         driving_command[nav_command] = 1.0
 
         # 5. Build DrivingScene
-        from qwen_drive.scene import DrivingScene, CameraFrame
+        from qwen_drive.scene import DrivingScene
 
         scene = DrivingScene(
             views=views,
@@ -272,16 +300,25 @@ class QwenDriveInferenceModel:
         )
         self._step_counter += 1
 
-        # 6. Run Qwen-Drive inference
+        # 6. Run Qwen-Drive inference. With RL sampling enabled, use the
+        # stochastic sampler (paper Eq. 9-12) so the emitted action has a
+        # differentiable transition likelihood; otherwise deterministic
+        # direct planning.
         inner_model = self._get_inner_model()
-        result = inner_model.generate_trajectory(
-            scene,
-            mode="direct_planning",
-            num_samples=num_samples,
-            num_steps=self._num_inference_steps,
-            seed=42,
-        )
-        trajectories = result.trajectories  # [num_samples, 50, 3] numpy
+        if self._rl_sampling_config is not None:
+            trajectories, rl_trace = self._stochastic_infer(
+                inner_model, scene, num_samples
+            )
+        else:
+            result = inner_model.generate_trajectory(
+                scene,
+                mode="direct_planning",
+                num_samples=num_samples,
+                num_steps=self._num_inference_steps,
+                seed=42,
+            )
+            trajectories = result.trajectories  # [num_samples, 50, 3] numpy
+            rl_trace = None
 
         # 7. Convert to AlpaGym format
         traj_tensor = torch.as_tensor(trajectories, dtype=torch.float32)  # [K, T, 3]
@@ -310,7 +347,78 @@ class QwenDriveInferenceModel:
                 heading[0, :3].tolist(),
             )
 
-        return pred_xyz, pred_rot
+        return pred_xyz, pred_rot, rl_trace
+
+    def _stochastic_infer(
+        self,
+        inner_model: Any,
+        scene: Any,
+        num_samples: int,
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+        """Sample with the stochastic flow sampler and record the RL trace.
+
+        Builds the processor inputs from ``scene``, runs the VLM prefill
+        exactly like ``_plan_from_cache``, then integrates the stochastic
+        sampler (paper Eq. 9-12). The trace persists everything the trainer
+        needs to re-evaluate the likelihood under new parameters: the
+        normalized conditioning tensors, the shared initial noise, and the
+        injected subspace coefficients.
+        """
+        from qwen_drive.trajectory import denormalize_trajectory, normalize_history
+
+        processor_inputs = inner_model.processor(scene, with_reasoning=False)
+        inputs = {
+            key: value.to(inner_model.device) if torch.is_tensor(value) else value
+            for key, value in processor_inputs.items()
+        }
+        scene_cache, anchor = inner_model._prefill(inputs)
+        scale = inner_model.trajectory_scale(inner_model.device)
+        history = normalize_history(inputs["history"].float(), scale)
+
+        seed = int(self._step_counter)
+        generator = torch.Generator(device=inner_model.device).manual_seed(seed)
+        noise = inner_model.config.noise_init_std * torch.randn(
+            num_samples,
+            inner_model.config.num_future_points,
+            inner_model.config.trajectory_point_dim,
+            generator=generator,
+            device=inner_model.device,
+            dtype=torch.float32,
+        )
+        normalized, z, states, old_logprob = stochastic_sample(
+            inner_model.planning_expert,
+            scene_cache=scene_cache,
+            position_anchor=anchor,
+            history=history,
+            history_velocity=inputs["history_velocity"].float(),
+            history_acceleration=inputs["history_acceleration"].float(),
+            nav_command=inputs["nav_command"],
+            ego_status=inputs["ego_status"].float(),
+            noise=noise,
+            config=self._rl_sampling_config,
+            generator=generator,
+        )
+        trajectories = denormalize_trajectory(normalized, scale).cpu().numpy()
+        # Condition the trace tensors to the sample axis so every value
+        # carries K on dim 0 (the caller stacks them across the batch axis).
+        trace = {
+            "history": history.expand(num_samples, -1, -1).cpu(),
+            "history_velocity": inputs["history_velocity"]
+            .float()
+            .expand(num_samples, -1, -1)
+            .cpu(),
+            "history_acceleration": inputs["history_acceleration"]
+            .float()
+            .expand(num_samples, -1, -1)
+            .cpu(),
+            "nav_command": inputs["nav_command"].expand(num_samples).cpu(),
+            "ego_status": inputs["ego_status"].float().expand(num_samples, -1).cpu(),
+            "initial_noise": noise.cpu(),
+            "z": z.cpu(),
+            "states": states.cpu(),
+            "old_logprob": old_logprob.cpu(),
+        }
+        return trajectories, trace
 
     def _build_camera_views(
         self,
@@ -328,12 +436,10 @@ class QwenDriveInferenceModel:
 
         camera_frames = model_input.camera_frames[batch_idx]  # [C*T, 3, H, W]
         camera_indices = model_input.camera_indices[batch_idx]  # [C*T]
-        num_total = camera_frames.shape[0]
+
 
         # Determine number of cameras and frames per camera
         unique_cams = torch.unique(camera_indices)
-        num_cameras = len(unique_cams)
-        frames_per_cam = num_total // num_cameras if num_cameras > 0 else 0
 
         # Group frames by camera index
         views = {}
@@ -436,46 +542,116 @@ class QwenDriveInferenceModel:
         model_output: ModelOutput,
         action_selection: ActionSelection,
     ) -> PolicyReplayData:
-        """Build replay data for RL training (Phase 4: GRPO).
+        """Pack selected-only Qwen-Drive replay data for the GRPO trainer.
 
-        Phase 3 (inference baseline): returns minimal replay data.
-        Phase 4 will implement proper flow-matching logprob computation.
+        Persists the six raw ``ModelInput`` fields (the trainer rebuilds the
+        ``DrivingScene`` from them, mirroring the rollout-side adapter) plus
+        the stochastic-sampling trace of the *selected* sample: initial noise,
+        injected subspace coefficients, and the rollout-time old log-prob.
         """
-        # For Phase 3, return a minimal replay payload
-        payload = {
+        if model_output.logprob is None or "z" not in model_output.extra:
+            raise ValueError(
+                "qwen_drive RL replay requires the stochastic sampling trace; "
+                "enable RL sampling (bundle_config.rl_sampling) for training runs"
+            )
+        old_logprob = model_output.logprob[
+            action_selection.set_ix, action_selection.sample_ix
+        ].view(()).cpu()
+
+        payload: dict[str, Any] = {
             "ego_history_xyz": model_input.ego_history_xyz.cpu().numpy().tolist(),
             "ego_history_rot": model_input.ego_history_rot.cpu().numpy().tolist(),
             "camera_frames": model_input.camera_frames.cpu().numpy().tolist(),
             "camera_indices": model_input.camera_indices.cpu().numpy().tolist(),
             "relative_timestamps": model_input.relative_timestamps.cpu().numpy().tolist(),
             "route_xy": model_input.route_xy.cpu().numpy().tolist(),
-            "pred_xyz": model_output.pred_xyz.cpu().numpy().tolist(),
-            "pred_rot": model_output.pred_rot.cpu().numpy().tolist(),
+            "selected_states": model_output.extra["states"][
+                action_selection.sample_ix
+            ].cpu(),
+            "selected_z": model_output.extra["z"][
+                action_selection.sample_ix
+            ].cpu(),
         }
         return PolicyReplayData(
             replay_schema_version=1,
             payload_schema="qwen_drive.trajectory.v1",
-            payload_schema_version=1,
+            payload_schema_version=2,
             model_family="qwen_drive",
             action_selection=action_selection,
-            old_logprob=torch.tensor(0.0, dtype=torch.float32),
+            old_logprob=old_logprob,
             payload=payload,
         )
 
-    @staticmethod
+    @classmethod
     def build_trainer_model_inputs(
+        cls,
         replay_data: PolicyReplayData,
         **kwargs,
     ) -> tuple[dict[str, Any], torch.Tensor]:
-        """Build trainer-side model inputs from replay data (Phase 4: GRPO).
+        """Build trainer-side forward kwargs from replay data (Phase 4: GRPO).
 
-        Phase 3: not used (no training).
+        The trainer re-runs the same ``DrivingScene`` construction the rollout
+        used (from the persisted raw inputs), re-runs the VLM prefill to get
+        the scene cache, and forwards the recorded initial noise and subspace
+        coefficients for the differentiable likelihood re-evaluation. The
+        forward kwargs keep the rollout's single-sample layout (no batch
+        axis); the packer stacks them across steps.
         """
-        # Phase 3: return minimal trainer inputs (forward() returns dummy log_probs)
-        # Phase 4 will build proper flow-matching forward kwargs from payload
-        model_inputs: dict[str, Any] = {}
-        old_logprob = torch.tensor(
-            float(replay_data.old_logprob) if replay_data.old_logprob is not None else 0.0,
-            dtype=torch.float32,
+        if replay_data.payload_schema != "qwen_drive.trajectory.v1":
+            raise ValueError(
+                f"qwen_drive replay payload_schema "
+                f"{replay_data.payload_schema!r} != 'qwen_drive.trajectory.v1'"
+            )
+        if replay_data.payload_schema_version != 2:
+            raise ValueError(
+                "qwen_drive replay payload_schema_version "
+                f"{replay_data.payload_schema_version} != 2 (stochastic trace); "
+                "re-run the rollout with the Phase 4 sampler"
+            )
+        payload = replay_data.payload
+        require_payload_keys(
+            replay_data.model_family,
+            payload,
+            (
+                "ego_history_xyz",
+                "ego_history_rot",
+                "camera_frames",
+                "camera_indices",
+                "relative_timestamps",
+                "route_xy",
+                "selected_states",
+                "selected_z",
+            ),
+        )
+
+        model_inputs: dict[str, Any] = {
+            key: torch.as_tensor(payload[key], dtype=torch.float32)
+            for key in (
+                "ego_history_xyz",
+                "ego_history_rot",
+                "camera_frames",
+                "route_xy",
+            )
+        }
+        model_inputs["camera_frames"] = torch.as_tensor(
+            payload["camera_frames"], dtype=torch.uint8
+        )
+        model_inputs["camera_indices"] = torch.as_tensor(
+            payload["camera_indices"], dtype=torch.int64
+        )
+        model_inputs["relative_timestamps"] = torch.as_tensor(
+            payload["relative_timestamps"], dtype=torch.int64
+        )
+        model_inputs["selected_states"] = torch.as_tensor(
+            payload["selected_states"], dtype=torch.float32
+        )
+        model_inputs["selected_z"] = torch.as_tensor(
+            payload["selected_z"], dtype=torch.float32
+        )
+
+        if replay_data.old_logprob is None:
+            raise ValueError("qwen_drive replay requires old_logprob")
+        old_logprob = torch.as_tensor(
+            replay_data.old_logprob, dtype=torch.float32
         ).reshape(())
         return model_inputs, old_logprob

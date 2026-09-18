@@ -19,6 +19,12 @@ model:
     planner_path: null
     upstream_path: null
     num_inference_steps: 10
+    # Phase 4 GRPO: enable the stochastic sampler (paper Eq. 9-12) so the
+    # emitted action carries a differentiable transition likelihood. Leave
+    # false for deterministic inference baselines.
+    rl_sampling: false
+    rl_epsilon: 0.05
+    rl_num_modes: 8
 
 inference:
   max_batch_size: 1
