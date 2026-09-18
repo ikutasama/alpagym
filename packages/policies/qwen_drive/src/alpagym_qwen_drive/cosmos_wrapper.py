@@ -498,7 +498,11 @@ class QwenDriveCosmos(BaseModel):
         normalized_history = normalize_history(inputs["history"].float(), scale)
 
         config = self.rl_sampling_config
-        return stochastic_logprob(
+        # The packer stacks per-row replay leaves as [B, ...]; indexing [row]
+        # yields the single-sample trace WITHOUT a leading batch dim
+        # ([N+1, T, D] / [K, m]). stochastic_logprob's contract (and the unit
+        # tests) require [B, ...] leaves, so re-add the sample axis here.
+        logprob = stochastic_logprob(
             self.model.planning_expert,
             scene_cache=scene_cache,
             position_anchor=anchor,
@@ -507,10 +511,11 @@ class QwenDriveCosmos(BaseModel):
             history_acceleration=inputs["history_acceleration"].float(),
             nav_command=inputs["nav_command"],
             ego_status=inputs["ego_status"].float(),
-            states=kwargs["selected_states"][row].float(),
-            z=kwargs["selected_z"][row].float(),
+            states=kwargs["selected_states"][row].float().unsqueeze(0),
+            z=kwargs["selected_z"][row].float().unsqueeze(0),
             config=config,
         )
+        return logprob.reshape(())
 
     def _build_replay_views(
         self, kwargs: dict[str, Any], row: int

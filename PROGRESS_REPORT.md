@@ -160,3 +160,80 @@ Process 0 completed successfully
 - grad_norm=0.0 (0.0 * param.sum() 銇仧銈?
 - lr=0 (瀛︾繏鐜囥偧銉€佹帹璜栥儥銉笺偣銉┿偆銉?
 - 銉椼儹銈汇偣姝ｅ父绲備簡锛坋xit code 1 銇仐锛?
+
+---
+
+# Phase 4: 鏈暘 GRPO 瀛︾繏 (2026-09-18) 鈥?瀹屽叏鎴愬姛
+
+## 姒傝
+
+upstream `530bb1d` (澶栭儴AI瀹熻: stochastic flow-matching GRPO, 璜栨枃 Eq. 9-14) 銈掋優銉笺偢銇椼€?3銇ゃ伄闅滃銈掍慨姝ｃ仐銇?Qwen-Drive 銇渶鍒濄伄**鏈墿銇?* GRPO 瀛︾繏銈广儐銉冦儣銈掑畬浜嗐仐銇熴€?Phase 3aa 銇ㄩ仌銇勩€乴ogprob 銇疅瑷堢畻銉诲嬀閰嶃伅瀹熶紳鎾兓銈儣銉嗐偅銉炪偆銈躲伅瀹熸洿鏂般€?
+```
+AlpaGym trainer step end current_step=1 steps=22 batches=22
+  loss_avg=0.926170 kl_avg=0.000000 ratio_min=0.006738 ratio_max=1.198841
+  clip_fraction=0.318182 grad_norm=364.843146 lr=1e-06
+Cosmos exit code: 0
+```
+
+## 淇銇椼仧 3 銇ゃ伄闅滃
+
+### 1. Driver port 5013 琛濈獊 (SO_REUSEPORT) 鈥?鏈€閲嶈
+
+AutoVLA entrypoint (PID 3361007) 銇ㄨ嚜 run 銇屼浮鏂?`127.0.0.1:5013` 銇?gRPC listen 銇椼仸銇勩仧銆?gRPC server 銇?SO_REUSEPORT 銇?bind 銇欍倠銇熴倎銆乲ernel 銇柊瑕忔帴缍氥倰**涓?listener 銇矤鑽峰垎鏁?*銇欍倠銆?鈫?remote AlPaSim 銇嬨倝銇?StartSession / teardown callback 銇岀磩 50% 銇⒑鐜囥仹浠栨柟銇?run 銇閰嶉€併仌銈屻€?`pop_session_record` 銇?`KeyError: '<session_uuid>'` 銇岀櫤鐢?(streaming_worker.py:257)銆?
+**銆宲oisoned scene銆嶃伄姝ｄ綋**: clipgt-e121e37d 銇儶銉堛儵銈ら€ｉ帠銇亾銇?port 琛濈獊銇棁鐘躲仩銇ｃ仧銆?灏傜敤 port (5014) 銇垏銈婃浛銇堛仧寰屻€佸悓 scene 銇竴搴︺倐澶辨晽銇涖仛 22 step 瀹岃蛋銇椼仧銆?
+**淇**: 灏傜敤 driver port 5014 + 灏傜敤 reverse tunnel
+(`ssh -R 5014:localhost:5014`, PID 銇?`/tmp/tunnel_5014.pid`)銆傛棦瀛?tunnel (PID 3318686,
+-L 5011 -R 5013) 銇?AutoVLA 銇ㄣ伄鍏辩敤銈ゃ兂銉曘儵銇仧銈佽Е銈夈仾銇勩€?
+### 2. GRPO experiment yaml 銇?`rl_sampling` 娆犺惤
+
+`configs/experiment/qwen_drive_a100_1gpu_grpo.yaml` 銇?`policy.model.bundle_config.rl_sampling: true` 銇岀劇銇勩€侰LI override 銇ц姝?
+
+```
+policy.model.bundle_config.rl_sampling=true
+```
+
+(upstream 銇搞伄鍙嶆槧鍊欒: yaml 銇搞伄杩藉姞)
+
+### 3. Trainer replay 銇?shape bug (浠婂洖銇?commit)
+
+`_replay_row_logprob` 銇?packer 銇?stack 銇椼仧 `[B, ...]` leaf 銇嬨倝 `[row]` 銈掑彇銈婂嚭銇欍亴銆?銇撱倢銇?leading batch dim 銇劇銇?`[N+1, T, D]` / `[K, m]`銆備竴鏂?`stochastic_logprob` 銇绱?(unit test 銈傚悓銇? 銇?`[B, ...]`銆傗啋 `predict_endpoint` 銇?2-D waypoints 銈掑彈銇?`ValueError: not enough values to unpack (expected 3, got 2)`銆?
+**淇** (`cosmos_wrapper.py`): `unsqueeze(0)` 銇?sample 杌搞倰鍐嶈拷鍔犮仐銆佹埢銈婂€ゃ倰 `reshape(())`銆?
+unit test 銇?batch 浠樸亶 tensor 銈掔洿鎺ユ浮銇椼仸銇勩仧銇熴倎 masked 銇曘倢銇︺亜銇熴€?
+## 妞滆
+
+### Offline replay test (淇濆瓨娓堛伩 artifact 銇?trainer path 銈掑啀鐝?
+
+```
+[test] new_logprobs = ['8.6597', '7.0815', '8.3175']
+[test] old_logprobs = ['8.6597', '7.0775', '8.3214']
+[test] finite=True  max_abs_diff=4.040e-03  max_rel_diff=5.708e-04
+[test] PASS: replay logprobs match rollout logprobs (ratio~1 at step 0)
+```
+
+閲嶃伩涓嶅銇倝 replay logprob 鈮?rollout logprob (float32 绮惧害銆佸樊銇?VLM prefill 銇?bf16 闈炴焙瀹氭€?銆?GRPO 銇?ratio 銇?step 0 銇ф纰恒伀 1.0 銇仾銈嬨亾銇ㄣ倰淇濊銆?
+### Full run (tmp/alpagym-runs/20260918T115622Z-23755f866c674cbfb3c271d030b23615)
+
+- 2 episodes (n_generation=2) 脳 22 steps銆佸疅 logprob (chosen_logprob 鈮?7-9)
+- 鏈€鍒濄伄 minibatch 缇ゃ伅 ratio 鈮?1 (0.959, 1.012, 0.992...) 鈥?鏁板鐨勬暣鍚堛伄瀹熻
+- clip_fraction=0.318: epsilon=0.05 銇?likelihood 銇嫮銇?(sigma 鈮?0.0158)銆?  mini-batch 鏇存柊銇岃搫绌嶃仚銈嬨仺 ratio 銇?trust region [0.8, 1.2] 銈掕秴銇堛倓銇欍亜
+- reward_mean=-0.0578 (gt_rmse 鈮?5.8m), reward_std=0.0018
+  鈫?2 generation 銇牨閰亴銇汇伡鍚屼竴 = 鎺㈢储涓嶈冻銆俥psilon 銈掍笂銇掋倠蹇呰鎬с倰绀恒仚
+- VRAM 33.6 GiB (GPU 6, A100 80GB)
+
+## 銈ゃ兂銉曘儵閬嬬敤銉°儮
+
+| 闋呯洰 | 鍊?|
+|---|---|
+| Qwen-Drive GPU | GPU 6 (CUDA_VISIBLE_DEVICES=6) |
+| AutoVLA GPU | 2, 3, 4, 5 (瑙︺倝銇亜) |
+| Qwen-Drive driver port | **5014** (灏傜敤 reverse tunnel) |
+| AutoVLA driver port | 5013 (鏃㈠瓨 tunnel 銇岄亱銇?鈥?瑙︺倝銇亜) |
+| AlPaSim runtime | localhost:5011 (鍏辩敤, 鏃㈠瓨 tunnel) |
+| Scene 瑙ｆ焙 | `alpasim_scene_ids.yaml` 銇?`scene_ids[prompt_idx]` (config 銇?`dataset.scene_ids` 銇疅璩?prompt 鏁般伄銇? |
+| launch script | `/tmp/run_phase4_grpo.sh` (3-stage wizard bypass) |
+
+## 娆°伄銈广儐銉冦儣
+
+1. **epsilon sweep {0.1, 0.3, 1.0}** (docs/PHASE4_GRPO.md 鎺ㄥエ):
+   epsilon=0.05 銇?likelihood 銇岄嫮銇欍亷 (clip 32%) 銇嬨仱 generation 闁撱伄琛屽嫊宸亴灏忋仌銇欍亷
+   (reward_std=0.0018) 鈥?GRPO 銇?advantage 銇屽疅璩?noise銆傘倛銈婂ぇ銇嶃亜 epsilon 銇ф帰绱倰纰轰繚銆?2. `max_num_steps > 1` 銇ц鏁?epoch 銇湰鐣缈掋€?3. scene 澶氭鍖?(170 scenes 銇嬨倝瑜囨暟 prompt) 銇?generalization銆?4. `/tmp` 璩囩敚 (venv, qd_model, qd_runs) 銇案缍氥儜銈圭Щ瑷€?
