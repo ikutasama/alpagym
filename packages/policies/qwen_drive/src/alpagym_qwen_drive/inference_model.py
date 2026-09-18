@@ -171,6 +171,20 @@ class QwenDriveInferenceModel:
         self._num_inference_steps = num_inference_steps
         self._step_counter = 0
 
+    def _get_inner_model(self) -> Any:
+        """Unwrap the actual QwenDriveForPlanning model.
+
+        Cosmos-RL may replace ``self._model`` with a ``QwenDriveCosmos``
+        wrapper (its ``BaseModel`` subclass) via ``set_model``.  The
+        ``generate_trajectory`` method lives on the inner
+        ``QwenDriveForPlanning`` which is at ``wrapper.model``.
+        """
+        m = self._model
+        # QwenDriveCosmos has .model = QwenDriveForPlanning
+        if hasattr(m, "model") and hasattr(m.model, "generate_trajectory"):
+            return m.model
+        return m
+
     def get_model(self) -> torch.nn.Module:
         return self._model
 
@@ -209,7 +223,7 @@ class QwenDriveInferenceModel:
         return BatchedModelOutput(
             pred_xyz=pred_xyz,
             pred_rot=pred_rot,
-            logprob=None,  # Phase 3: no logprob for inference baseline
+            logprob=torch.zeros(batch_size, 1, num_samples),  # Dummy logprob to trigger replay_data creation
             extra={},
         )
 
@@ -259,7 +273,8 @@ class QwenDriveInferenceModel:
         self._step_counter += 1
 
         # 6. Run Qwen-Drive inference
-        result = self._model.generate_trajectory(
+        inner_model = self._get_inner_model()
+        result = inner_model.generate_trajectory(
             scene,
             mode="direct_planning",
             num_samples=num_samples,
@@ -372,8 +387,15 @@ class QwenDriveInferenceModel:
             ego_velocity: [2] (vx, vy) at current time
             ego_acceleration: [2] (ax, ay) at current time
         """
-        ego_history_xyz = model_input.ego_history_xyz[batch_idx]  # [H, 3]
-        ego_history_rot = model_input.ego_history_rot[batch_idx]  # [H, 3, 3]
+        ego_history_xyz = model_input.ego_history_xyz[batch_idx]  # expected [H, 3] but may be [S, H, 3]
+        ego_history_rot = model_input.ego_history_rot[batch_idx]  # expected [H, 3, 3] but may be [S, H, 3, 3]
+
+        # Handle extra "set" dimension: model_input is [B, S, H, 3] / [B, S, H, 3, 3]
+        # After [batch_idx], we get [S, H, 3] / [S, H, 3, 3] where S=1
+        if ego_history_xyz.dim() == 3:
+            ego_history_xyz = ego_history_xyz[0]  # [S, H, 3] 鈫?[H, 3]
+        if ego_history_rot.dim() == 4:
+            ego_history_rot = ego_history_rot[0]  # [S, H, 3, 3] 鈫?[H, 3, 3]
 
         n = ego_history_xyz.shape[0]
 
@@ -431,9 +453,13 @@ class QwenDriveInferenceModel:
             "pred_rot": model_output.pred_rot.cpu().numpy().tolist(),
         }
         return PolicyReplayData(
-            payload=payload,
-            old_logprob=0.0,  # Placeholder; Phase 4 will compute actual flow-matching logprob
+            replay_schema_version=1,
+            payload_schema="qwen_drive.trajectory.v1",
+            payload_schema_version=1,
+            model_family="qwen_drive",
             action_selection=action_selection,
+            old_logprob=torch.tensor(0.0, dtype=torch.float32),
+            payload=payload,
         )
 
     @staticmethod
@@ -445,10 +471,11 @@ class QwenDriveInferenceModel:
 
         Phase 3: not used (no training).
         """
-        # Placeholder for Phase 4
+        # Phase 3: return minimal trainer inputs (forward() returns dummy log_probs)
+        # Phase 4 will build proper flow-matching forward kwargs from payload
         model_inputs: dict[str, Any] = {}
         old_logprob = torch.tensor(
-            replay_data.old_logprob if replay_data.old_logprob is not None else 0.0,
+            float(replay_data.old_logprob) if replay_data.old_logprob is not None else 0.0,
             dtype=torch.float32,
-        )
+        ).reshape(())
         return model_inputs, old_logprob

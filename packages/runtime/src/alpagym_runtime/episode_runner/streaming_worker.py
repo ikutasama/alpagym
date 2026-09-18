@@ -237,9 +237,21 @@ class StreamingRolloutWorker:
                 )
             rollout_return = sim_return.rollout_returns[0]
             if not rollout_return.success:
+                _err_code = getattr(rollout_return, 'error_code', 'N/A')
+                logger.error(
+                    "AlPaSim rollout FAILED: session=%s scene=%s success=%s error=%r error_code=%s rollout_uuid=%s driver=%s:%s",
+                    rollout_job.session_uuid,
+                    rollout_job.scene_id,
+                    rollout_return.success,
+                    rollout_return.error,
+                    _err_code,
+                    rollout_return.rollout_uuid,
+                    self._driver_endpoint.host,
+                    self._driver_endpoint.port,
+                )
                 self._on_rollout_failed(
                     rollout_job,
-                    RuntimeError(rollout_return.error or "AlpaSim rollout failed"),
+                    RuntimeError(f"AlPaSim rollout failed: error={rollout_return.error!r} error_code={_err_code} driver={self._driver_endpoint.host}:{self._driver_endpoint.port}"),
                 )
                 return
             record = self._driver_server.servicer.pop_session_record(rollout_job.session_uuid)
@@ -290,6 +302,17 @@ class StreamingRolloutWorker:
 
             self._on_rollout_succeeded(rollout_job, episode)
         except Exception as exc:
+            logger.error(
+                "simulate() raised exception: type=%s msg=%r repr=%r session=%s scene=%s driver=%s:%s",
+                type(exc).__name__,
+                str(exc),
+                repr(exc),
+                rollout_job.session_uuid,
+                rollout_job.scene_id,
+                self._driver_endpoint.host,
+                self._driver_endpoint.port,
+                exc_info=True,
+            )
             self._on_rollout_failed(rollout_job, exc)
         finally:
             try:

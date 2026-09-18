@@ -392,9 +392,17 @@ class QwenDriveCosmos(BaseModel):
                 device = next(self.parameters()).device
 
         log_probs = torch.zeros(batch_size, device=device, dtype=torch.float32)
+        # Connect log_probs to model parameters so loss.backward() has a grad_fn.
+        # The 0.0 multiplier ensures values don't change; with lr=0.0 the optimizer
+        # step is a no-op. Phase 4 will replace this with real flow-matching logprobs.
+        trainable_params = [p for p in self.parameters() if p.requires_grad]
+        if trainable_params:
+            log_probs = log_probs + 0.0 * trainable_params[0].sum()
         kl_div = None
         if teacher_model is not None:
             kl_div = torch.zeros(batch_size, device=device, dtype=torch.float32)
+            if trainable_params:
+                kl_div = kl_div + 0.0 * trainable_params[0].sum()
 
         return {"log_probs": log_probs, "kl_div": kl_div}
 
